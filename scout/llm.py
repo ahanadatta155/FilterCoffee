@@ -7,9 +7,10 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from openai import APIConnectionError, APIStatusError, OpenAI
+from openai.types.chat import ChatCompletionMessageParam
 from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from scout.config import Settings
@@ -18,6 +19,7 @@ from scout.errors import ConfigurationError, ModelError
 from scout.models import ModelInfo, price, resolve_models
 
 Role = Literal["fast", "strong", "escalation"]
+ChatMessages = list[ChatCompletionMessageParam]
 logger = logging.getLogger(__name__)
 
 
@@ -33,7 +35,20 @@ class LLMResponse:
 
 
 class LLMClient(Protocol):
-    def chat(self, stage: str, messages: list[dict], **kwargs: Any) -> LLMResponse: ...
+    calls: list[ModelCall]
+    warnings: list[str]
+
+    def chat(
+        self,
+        stage: str,
+        messages: ChatMessages,
+        *,
+        role: Role = "fast",
+        max_tokens: int = 4096,
+        require_vision: bool = False,
+    ) -> LLMResponse: ...
+
+    def close(self) -> None: ...
 
 
 def parse_json(text: str) -> dict[str, Any]:
@@ -70,7 +85,24 @@ def _friendly(error: APIStatusError | APIConnectionError) -> ModelError:
         429: "Provider rate limit reached; wait and try again.",
         404: "Model unavailable; refresh model discovery or choose another free model.",
     }
-    return ModelError(messages.get(status, "Model request failed; check provider availability."))
+    message = (
+        messages[status]
+        if isinstance(status, int) and status in messages
+        else "Model request failed; check provider availability."
+    )
+    if status == 429 and isinstance(error, APIStatusError):
+        headers = error.response.headers
+        limit = headers.get("x-ratelimit-limit")
+        remaining = headers.get("x-ratelimit-remaining")
+        retry_after = headers.get("retry-after")
+        details = []
+        if limit and remaining:
+            details.append(f"OpenRouter rate limit remaining {remaining}/{limit}")
+        if retry_after and retry_after.isdigit():
+            details.append(f"Retry-After: {retry_after}s")
+        if details:
+            message += " " + "; ".join(details) + "."
+    return ModelError(message)
 
 
 def _format_error(error: APIStatusError) -> bool:
@@ -132,7 +164,7 @@ class ModelClient:
     def __exit__(self, *args: Any) -> None:
         self.close()
 
-    def _retry(self, action: Callable) -> Any:
+    def _retry(self, action: Callable[..., Any]) -> Any:
         return Retrying(
             retry=retry_if_exception(_transient),
             stop=stop_after_attempt(4),
@@ -144,7 +176,7 @@ class ModelClient:
     def chat(
         self,
         stage: str,
-        messages: list[dict],
+        messages: ChatMessages,
         *,
         role: Role = "fast",
         max_tokens: int = 4096,
@@ -190,13 +222,18 @@ class ModelClient:
                 raise _friendly(error) from None
 
     def _attempt(
-        self, stage: str, messages: list[dict], model: ModelInfo, max_tokens: int, use_json: bool
+        self, stage: str, messages: ChatMessages, model: ModelInfo, max_tokens: int, use_json: bool
     ) -> LLMResponse:
         started = time.perf_counter()
+        create = cast(Any, self._sdk.chat.completions.create)
         kwargs = {"response_format": {"type": "json_object"}} if use_json else {}
         try:
-            response = self._sdk.chat.completions.create(
-                model=model.id, messages=messages, temperature=0, max_tokens=max_tokens, **kwargs
+            response = create(
+                model=model.id,
+                messages=messages,
+                temperature=0,
+                max_tokens=max_tokens,
+                **kwargs,
             )
         except (APIStatusError, APIConnectionError):
             self.calls.append(
@@ -215,6 +252,8 @@ class ModelClient:
         elapsed = int((time.perf_counter() - started) * 1000)
         choice = response.choices[0] if response.choices else None
         text = choice.message.content if choice else None
+        if not isinstance(text, str):
+            text = ""
         warnings: list[str] = []
         usage = response.usage
         prompt_tokens = getattr(usage, "prompt_tokens", None)
@@ -243,7 +282,8 @@ class ModelClient:
             cost = 0.0
             warnings.append("Cost unknown: no provider usage cost or verified pricing available.")
         unexpected_charge = self.settings.provider == "openrouter" and cost > 0
-        valid = bool(text and text.strip()) and choice.finish_reason not in {
+        finish_reason = choice.finish_reason if choice else ""
+        valid = bool(text and text.strip()) and finish_reason not in {
             "length",
             "content_filter",
         }

@@ -31,7 +31,7 @@ def find_candidate_groups(page: CleanPage) -> list[CandidateGroup]:
         child = parent.first_child
         while child is not None:
             if child.tag in {"article", "div", "li", "tr", "section", "a"}:
-                classes = ".".join(sorted(set(child.attributes.get("class", "").split())))
+                classes = ".".join(sorted(set((child.attributes.get("class") or "").split())))
                 siblings[(child.tag, classes)].append(child)
             child = child.next
         for (tag, classes), nodes in siblings.items():

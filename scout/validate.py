@@ -227,6 +227,8 @@ def validate_items(raw: Any, plan: ExtractionPlan, source: str) -> ValidationRes
         deterministic = min(0.99, max(0.05, deterministic))
         model_conf = raw_item.get("confidence")
         try:
+            if model_conf is None:
+                raise ValueError
             model_conf = min(1.0, max(0.0, float(model_conf)))
             if not math.isfinite(model_conf):
                 model_conf = None

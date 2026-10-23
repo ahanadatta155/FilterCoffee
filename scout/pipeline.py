@@ -1,14 +1,15 @@
 """End-to-end page extraction with evidence validation and one repair pass."""
 
 import json
+import os
 import re
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from scout.cache import Cache, digest
 from scout.clean import CleanPage, clean_page
@@ -16,7 +17,8 @@ from scout.config import Settings, load_settings
 from scout.contracts import ExtractionPlan, ExtractResult, FieldSpec, ModelCall, RunMeta
 from scout.errors import ScoutError
 from scout.fetch import Fetcher
-from scout.llm import LLMClient, ModelClient, parse_json
+from scout.gemini import ExtractionRouter, GeminiExtractionClient
+from scout.llm import ChatMessages, LLMClient, ModelClient, Role, parse_json
 from scout.represent import build_representation, find_candidate_groups
 from scout.security import resolve_host, validate_url
 from scout.validate import validate_items
@@ -32,7 +34,7 @@ class RunOptions:
     force_refresh: bool = False
     max_items: int = 100
     force_browser: bool = False
-    routing: str = "auto"
+    routing: str = "gemini"
 
 
 def _schema(value: dict[str, Any] | None) -> ExtractionPlan | None:
@@ -67,7 +69,7 @@ def _schema(value: dict[str, Any] | None) -> ExtractionPlan | None:
                     "required": name in required,
                 }
             )
-    return ExtractionPlan(mode="single", fields=fields)
+    return ExtractionPlan.model_validate({"mode": "single", "fields": fields})
 
 
 def _fallback_plan(instruction: str, schema: dict[str, Any] | None) -> ExtractionPlan:
@@ -106,8 +108,11 @@ def _plan_prompt(instruction: str, page: CleanPage, representation: str) -> str:
     )
 
 
-def _messages(system: str, payload: str) -> list[dict[str, str]]:
-    return [{"role": "system", "content": system}, {"role": "user", "content": payload}]
+def _messages(system: str, payload: str) -> ChatMessages:
+    return cast(
+        ChatMessages,
+        [{"role": "system", "content": system}, {"role": "user", "content": payload}],
+    )
 
 
 def _mode(plan: ExtractionPlan, instruction: str, groups: int) -> ExtractionPlan:
@@ -177,7 +182,7 @@ def run(
             settings_error = error
             settings = Settings(
                 provider="openrouter",
-                api_key="",
+                api_key=SecretStr(""),
                 base_url="https://openrouter.ai/api/v1/",
                 model_fast="",
                 model_strong="",
@@ -193,10 +198,20 @@ def run(
     owned_llm = llm is None
     if llm is None and settings_error is None:
         try:
-            llm = ModelClient(settings)
+            nemotron = ModelClient(settings)
+            if options.routing == "gemini":
+                try:
+                    gemini = GeminiExtractionClient(os.getenv("GEMINI_KEY", ""))
+                except ScoutError:
+                    nemotron.close()
+                    raise
+                llm = ExtractionRouter(nemotron, gemini)
+            else:
+                llm = nemotron
         except ScoutError as error:
             settings_error = error
-    llm = llm or _UnavailableLLM()
+    if llm is None:
+        llm = _UnavailableLLM()
     run_id = uuid.uuid4().hex
     call_start = len(getattr(llm, "calls", []))
     warnings: list[str] = []
@@ -218,6 +233,9 @@ def run(
                     "ignore_robots": options.ignore_robots,
                     "max_items": options.max_items,
                     "routing": options.routing,
+                    "gemini_key_configured": bool(os.getenv("GEMINI_KEY", "").strip())
+                    if options.routing == "gemini"
+                    else False,
                     "version": 2,
                 },
             },
@@ -289,7 +307,12 @@ def run(
                     raise _PipelineStop
                 plan = _mode(planned, instruction, len(groups))
             else:
-                plan = _mode(_schema(schema), instruction, len(groups))
+                supplied_plan = _schema(schema)
+                if supplied_plan is None:
+                    raise ValueError(
+                        "The supplied schema could not be converted to an extraction plan."
+                    )
+                plan = _mode(supplied_plan, instruction, len(groups))
             system = (PROMPTS / "extract.md").read_text(encoding="utf-8")
             payload = json.dumps(
                 {"instruction": instruction, "schema": plan.model_dump(), "page": representation},
@@ -413,11 +436,20 @@ class _PipelineStop(Exception):
 class _UnavailableLLM:
     """Allow configuration failures to return the promised partial result."""
 
-    calls: list[ModelCall] = []
-    warnings: list[str] = []
+    def __init__(self) -> None:
+        self.calls: list[ModelCall] = []
+        self.warnings: list[str] = []
 
     def close(self) -> None:
         return None
 
-    def chat(self, stage: str, messages: list[dict], **kwargs: Any):
+    def chat(
+        self,
+        stage: str,
+        messages: ChatMessages,
+        *,
+        role: Role = "fast",
+        max_tokens: int = 4096,
+        require_vision: bool = False,
+    ):
         raise ScoutError("Model provider is not configured.")

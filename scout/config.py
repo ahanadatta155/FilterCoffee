@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
@@ -118,7 +118,7 @@ def _select_provider() -> Provider:
     if override != "auto" and override not in _PROVIDERS:
         raise ConfigurationError("SCOUT_PROVIDER must be auto, nebius, openrouter, or nvidia.")
     if override != "auto":
-        provider = next(provider for provider in _PROVIDERS if provider == override)
+        provider = cast(Provider, override)
         if not _first_key(provider):
             names = " or ".join(_KEY_NAMES[provider])
             raise ConfigurationError(f"SCOUT_PROVIDER={provider} requires {names}.")

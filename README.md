@@ -221,19 +221,33 @@ as runtime data even though `data/` is gitignored.
 
 ## One-click live test (Windows)
 
-Double-click `run_scout.bat` in the project folder. It runs the public Books to
-Scrape demo using OpenRouter, prints a terminal table and evidence quotes, then
-keeps the window open so you can read the output. The runner refuses to start if
-`SCOUT_PROVIDER` selects Nebius or NVIDIA. To run from PowerShell:
+Double-click `run_scout.bat` in the project folder. It prompts for a public page
+URL and a plain-English description of the data you want. Press Enter to use the
+Books to Scrape sample values. Nemotron plans the fields; Gemini 3.5 Flash-Lite
+extracts them; Nemotron handles repair if needed. The runner prints a table and
+evidence quotes, then keeps the window open. It refuses to start if
+`SCOUT_PROVIDER` selects Nebius or NVIDIA. To run non-interactively from PowerShell:
 
 ```powershell
-uv run python run_scout.py
+uv run python run_scout.py --url "https://books.toscrape.com/" --instruction "Extract each book's title, price, rating, and availability."
 ```
 
 Use `run_scout.bat --refresh` (or add `--refresh` to the PowerShell command) to
-fetch and extract again instead of using the cached result. `--url URL` tests a
-different page; the example schema targets product data, so other pages may show
-nulls. This is terminal output, not the Streamlit UI, which is a later stage.
+fetch and extract again instead of using the cached result. `--url URL` and
+`--instruction "..."` can be supplied separately; omitted values prompt in the
+terminal. No schema is hard-coded: Nemotron plans fields from the request and
+page signals. This is terminal output, not the Streamlit UI, which is a later stage.
+The runner makes a small authenticated OpenRouter key-status request before
+scraping, then prints total elapsed time, per-call token counts/model latency, and
+the quota fields OpenRouter exposes. It can report free-model daily requests
+(RPD) and configured credit budget, but OpenRouter does not expose current RPM or
+TPM/TPD remaining counters through that endpoint. 429 responses may provide the
+specific rate-limit headers and Retry-After value when a limit is actually hit.
+
+The runner requires `GEMINI_KEY` in the project `.env` for extraction. It reports
+each call's model, tokens, latency, warnings, and recorded cost. Google
+free-tier quotas and billing depend on the AI Studio project; verify them there.
+Google may use free-tier prompts to improve its products.
 
 ## Development checks
 

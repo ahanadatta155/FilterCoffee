@@ -42,7 +42,7 @@ class CleanPage:
     url: str
     title: str | None
     meta_description: str | None
-    jsonld: list
+    jsonld: list[dict[str, object] | list[object]]
     tables: list[Table]
     main_text: str
     source_text: str
@@ -58,7 +58,7 @@ def clean_page(html: str, url: str) -> CleanPage:
     title_node = tree.css_first("title")
     title = normalize_text(title_node.text()) if title_node else None
     meta = tree.css_first('meta[name="description"]')
-    description = normalize_text(meta.attributes.get("content", "")) if meta else None
+    description = normalize_text(meta.attributes.get("content") or "") if meta else None
     scripts = bool(tree.css("script"))
     app_shell = bool(tree.css("#app, #root"))
     noscript = any("enable javascript" in node.text().lower() for node in tree.css("noscript"))
@@ -80,11 +80,12 @@ def clean_page(html: str, url: str) -> CleanPage:
     for node in reversed(tree.css("[style]")):
         if re.search(
             r"(?:display\s*:\s*none|visibility\s*:\s*hidden)",
-            node.attributes.get("style", ""),
+            node.attributes.get("style") or "",
             re.I,
         ):
             node.decompose()
-    visible = normalize_text(tree.body.text(separator=" ") if tree.body else "")
+    visible_text = tree.body.text(separator=" ") if tree.body else ""
+    visible = normalize_text(visible_text or "")
     blocked = len(visible) < 1500 and bool(
         re.search(
             r"(?:complete (?:the |a )?captcha|verify (?:that )?you are human|"
@@ -102,14 +103,16 @@ def clean_page(html: str, url: str) -> CleanPage:
     source_parts.extend(json.dumps(value, ensure_ascii=False) for value in jsonld)
     for node in tree.css("a[href], [title], [aria-label], img[alt], time[datetime]"):
         for name in ("title", "aria-label", "alt", "datetime"):
-            if node.attributes.get(name):
-                source_parts.append(node.attributes[name])
-        if node.attributes.get("href"):
-            link = safe_link(url, node.attributes["href"])
+            value = node.attributes.get(name)
+            if value:
+                source_parts.append(value)
+        href = node.attributes.get("href")
+        if href:
+            link = safe_link(url, href)
             if link:
                 source_parts.append(link)
     for node in tree.css("[class]"):
-        classes = normalize_text(node.attributes.get("class", ""))
+        classes = normalize_text(node.attributes.get("class") or "")
         if "star-rating" in classes.casefold():
             source_parts.append(classes)
     for node in reversed(tree.css("nav, footer, [role='navigation']")):
@@ -128,14 +131,18 @@ def clean_page(html: str, url: str) -> CleanPage:
         )
     main_text = (
         trafilatura.extract(
-            tree.html, url=url, include_comments=False, include_tables=False, output_format="txt"
+            tree.html or "",
+            url=url,
+            include_comments=False,
+            include_tables=False,
+            output_format="txt",
         )
         if visible
         else None
     )
     fallback = tree.css_first("main, article") or tree.body
     if not main_text:
-        main_text = fallback.text(separator=" ") if fallback else ""
+        main_text = (fallback.text(separator=" ") or "") if fallback else ""
     return CleanPage(
         url,
         title or None,

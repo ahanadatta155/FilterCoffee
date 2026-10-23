@@ -3,7 +3,7 @@
 from typing import Any
 
 
-def extract(url: str, instruction: str, schema: dict | None = None, **options: Any):
+def extract(url: str, instruction: str, schema: dict[str, Any] | None = None, **options: Any):
     """Extract verified fields from a public page; see `scout.pipeline.run`."""
     from scout.pipeline import run
 

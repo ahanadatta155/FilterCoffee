@@ -14,7 +14,9 @@ Resolver = Callable[[str, int], Iterable[str]]
 
 
 def resolve_host(hostname: str, port: int) -> list[str]:
-    return [entry[4][0] for entry in socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)]
+    return [
+        str(entry[4][0]) for entry in socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    ]
 
 
 @dataclass(frozen=True)
