@@ -1,0 +1,41 @@
+[project]
+name = "nemotron-scout"
+version = "0.1.0"
+description = "Evidence-backed structured extraction from public web pages."
+readme = "README.md"
+authors = [
+    { email = "rajdeepchanda07@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28,<1",
+    "openai>=2,<3",
+    "pydantic>=2.11,<3",
+    "python-dotenv>=1.1,<2",
+    "selectolax>=0.3.29,<1",
+    "tenacity>=9,<10",
+    "trafilatura>=2,<3",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "respx>=0.22,<1", "ruff>=0.12,<1"]
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "scout"
+module-root = ""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: requires network or browser"]
+addopts = "-m 'not live'"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
