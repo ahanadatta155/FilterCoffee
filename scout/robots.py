@@ -22,7 +22,10 @@ class RobotsChecker:
             if status == 404:
                 lines = []
             elif status in {401, 403}:
-                lines = ["User-agent: *", "Disallow: /"]
+                raise RobotsError(
+                    f"robots.txt returned HTTP {status}, so crawling is denied. "
+                    "Use --ignore-robots only if you own the site."
+                )
             elif 200 <= status < 300:
                 lines = text.splitlines()
             else:

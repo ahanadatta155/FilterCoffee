@@ -221,8 +221,8 @@ def resolve_request(
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": request},
                 ],
-                role="fast",
-                max_tokens=1200,
+                role="strong",
+                max_tokens=4096,
             )
             intent = RequestIntent.model_validate(parse_json(intent_response.text))
         except (ScoutError, ValidationError, ValueError) as error:
@@ -279,7 +279,7 @@ def resolve_request(
                     },
                 ],
                 role="fast",
-                max_tokens=300,
+                max_tokens=1024,
             )
             selection = CandidateSelection.model_validate(parse_json(selection_response.text))
         except (ScoutError, ValidationError, ValueError) as error:
