@@ -126,7 +126,7 @@ class GeminiExtractionClient:
 class ExtractionRouter:
     """Use Gemini only for extraction; keep planning and repair on the other client."""
 
-    def __init__(self, other: LLMClient, gemini: LLMClient):
+    def __init__(self, other: LLMClient, gemini: LLMClient | None):
         self.other = other
         self.gemini = gemini
         self.calls: list[ModelCall] = []
@@ -136,7 +136,16 @@ class ExtractionRouter:
         ]
 
     def chat(self, stage: str, messages: ChatMessages, **kwargs: Any) -> LLMResponse:
-        client = self.gemini if stage == "extract" else self.other
+        if kwargs.get("require_vision"):
+            client = self.other
+        elif stage == "extract":
+            if self.gemini is None:
+                raise ConfigurationError(
+                    "Set GEMINI_KEY for text extraction; screenshot vision uses Nemotron."
+                )
+            client = self.gemini
+        else:
+            client = self.other
         call_start = len(client.calls)
         warning_start = len(client.warnings)
         try:
@@ -165,5 +174,6 @@ class ExtractionRouter:
         return response
 
     def close(self) -> None:
-        self.gemini.close()
+        if self.gemini is not None:
+            self.gemini.close()
         self.other.close()

@@ -1,7 +1,6 @@
 """Run a live, evidence-backed extraction from a public web page."""
 
 import argparse
-import os
 import sys
 import time
 import unicodedata
@@ -9,7 +8,7 @@ import unicodedata
 from scout import extract
 from scout.config import load_settings
 from scout.contracts import ExtractedItem, FieldSpec
-from scout.errors import ConfigurationError, ScoutError
+from scout.errors import ScoutError
 from scout.limits import get_openrouter_key_status
 from scout.pipeline import RunOptions
 
@@ -50,6 +49,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--refresh", action="store_true", help="Fetch and extract again instead of using cache"
     )
+    browser = parser.add_mutually_exclusive_group()
+    browser.add_argument("--browser", action="store_true", help="Force Chromium rendering")
+    browser.add_argument(
+        "--no-browser", dest="use_browser", action="store_false", help="Disable browser fallback"
+    )
+    parser.set_defaults(use_browser=True)
     args = parser.parse_args(argv)
     started = time.perf_counter()
     try:
@@ -60,8 +65,6 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        if not os.getenv("GEMINI_KEY", "").strip():
-            raise ConfigurationError("Set GEMINI_KEY in the project .env to use Gemini extraction.")
         url = args.url or input(f"Website URL [{DEFAULT_URL}]: ").strip() or DEFAULT_URL
         instruction = (
             args.instruction
@@ -84,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
             options=RunOptions(
                 max_items=args.max_items,
                 force_refresh=args.refresh,
+                force_browser=args.browser,
+                use_browser=args.use_browser,
                 routing="gemini",
             ),
             settings=settings,
@@ -96,10 +101,15 @@ def main(argv: list[str] | None = None) -> int:
     if callable(reconfigure):
         reconfigure(encoding="utf-8", errors="backslashreplace")
     elapsed = time.perf_counter() - started
+    extractor = (
+        "Nemotron Super VL (vision)"
+        if result.meta.fetch_tier == "browser+vision"
+        else "Gemini 3.5 Flash-Lite"
+    )
     print(f"Nemotron Scout | {_display(result.meta.url)}")
     print(
         f"Fetch: {result.meta.fetch_tier} | Items: {len(result.items)} "
-        f"| Cache hit: {result.meta.cache_hit} | Extractor: Gemini 3.5 Flash-Lite"
+        f"| Cache hit: {result.meta.cache_hit} | Extractor: {extractor}"
     )
     print(
         f"Model calls: {len(result.meta.model_calls)} | Cost: ${result.meta.estimated_cost_usd:.4f}"

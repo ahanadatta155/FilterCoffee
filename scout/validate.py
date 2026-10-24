@@ -152,7 +152,9 @@ def _context(source: str, value: str, size: int = 180) -> str | None:
     return None
 
 
-def validate_items(raw: Any, plan: ExtractionPlan, source: str) -> ValidationResult:
+def validate_items(
+    raw: Any, plan: ExtractionPlan, source: str, *, vision: bool = False
+) -> ValidationResult:
     errors: list[str] = []
     raw_items = raw.get("items") if isinstance(raw, dict) else None
     if not isinstance(raw_items, list):
@@ -193,7 +195,7 @@ def validate_items(raw: Any, plan: ExtractionPlan, source: str) -> ValidationRes
             evidence = evidence_by_field.get(name, {})
             quote = evidence.get("quote") if isinstance(evidence, dict) else None
             if not isinstance(quote, str) or not quote.strip():
-                quote = _context(source, str(value))
+                quote = None if vision else _context(source, str(value))
                 if quote:
                     deterministic -= 0.35
                     errors.append(
@@ -202,7 +204,7 @@ def validate_items(raw: Any, plan: ExtractionPlan, source: str) -> ValidationRes
                 else:
                     deterministic -= 0.35
                     errors.append(f"item {index}: evidence missing for {name}")
-            elif _normalized(quote) not in _normalized(source):
+            elif not vision and _normalized(quote) not in _normalized(source):
                 deterministic -= 0.35
                 errors.append(f"item {index}: quote for {name} is not in source")
                 quote = None
@@ -214,7 +216,11 @@ def validate_items(raw: Any, plan: ExtractionPlan, source: str) -> ValidationRes
                 deterministic += 0.1
             if quote:
                 evidence_out.append(
-                    Evidence(field=name, quote=quote, selector=evidence.get("selector"))
+                    Evidence(
+                        field=name,
+                        quote=quote,
+                        selector="screenshot" if vision else evidence.get("selector"),
+                    )
                 )
             else:
                 data[name] = None
@@ -237,6 +243,8 @@ def validate_items(raw: Any, plan: ExtractionPlan, source: str) -> ValidationRes
         confidence = (
             0.7 * deterministic + 0.3 * model_conf if model_conf is not None else deterministic
         )
+        if vision:
+            confidence = min(confidence, 0.75)
         if non_null:
             key = hashlib.sha256("|".join(identity).encode("utf-8")).hexdigest()
             if plan.mode == "list" and key in seen:

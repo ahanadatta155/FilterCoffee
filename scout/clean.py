@@ -95,7 +95,7 @@ def clean_page(html: str, url: str) -> CleanPage:
         )
     )
     needs_render = (
-        noscript
+        (noscript and len(visible) < 200)
         or ((scripts or app_shell) and len(visible) < 200)
         or (canvas and len(visible) < 200)
     )

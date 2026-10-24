@@ -21,5 +21,9 @@ class FetchError(ScoutError):
     """A page could not be downloaded safely."""
 
 
+class BrowserError(ScoutError):
+    """A browser could not safely render the page."""
+
+
 class RobotsError(FetchError):
     """Robots rules deny access or could not be verified."""

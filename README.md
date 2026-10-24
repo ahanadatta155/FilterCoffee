@@ -17,10 +17,12 @@ fixture contains 12 cards; article, JavaScript shell, canvas, blocked, malformed
 empty, Unicode, and JSON-LD fixtures are included.
 
 Implemented core API: automatic schema planning, evidence-backed extraction,
-normalization/validation, one repair pass, and SQLite page/result cache. Browser,
-vision, extraction CLI, UI, and batch mode are future stages. Tests use real parsing
-and mocked HTTP/model responses. A live 20-book extraction from Books to Scrape was
-verified with the OpenRouter free model (one call, reported cost $0.00).
+normalization/validation, one repair pass, SQLite page/result cache, and an optional
+Playwright Chromium fallback for JavaScript-rendered pages. Canvas or nearly empty
+rendered pages can use screenshot-based Nemotron vision. Tests use real local Chromium
+and HTML parsing plus mocked HTTP/model responses. A live 20-book extraction from
+Books to Scrape was verified with the OpenRouter free model (one call, reported cost
+$0.00).
 
 OpenRouter's free Nemotron IDs were verified against its live `/models` endpoint:
 `nvidia/nemotron-3.5-lightning:free`, `nvidia/nemotron-3.5-super-vl:free`, and
@@ -39,6 +41,10 @@ Copy-Item .env.example .env
 uv run python scripts/check_env.py
 uv run python -c "import scout; print('ok')"
 ```
+
+For JavaScript pages, install Chromium once with `uv run playwright install chromium`
+or double-click `install_browser.bat`. This downloads browser binaries (a few hundred
+MB); Node.js/npm are not required.
 
 `check_env.py` only prints whether each key is present or absent. It does not
 authenticate with any provider. It exits with code 1 when all keys are absent.
@@ -179,9 +185,20 @@ can be supplied for stronger models. These are structural heuristics, not extrac
 or verified model results.
 
 Short scripted/app-root pages, JavaScript noscript messages, and canvas-only pages
-are marked for rendering. **Playwright and vision are not implemented yet**; flags
-identify when the later browser stage will be needed. Blocked-page detection is
-also heuristic. Nothing in this stage executes page scripts or follows page links.
+are marked for rendering. When enabled, the Playwright fallback runs Chromium in a
+fresh headless context, with bounded navigation and a loopback proxy that validates
+and pins outbound IP addresses. Unsafe/private destinations are blocked, non-GET/HEAD
+browser requests are denied, and service workers are disabled. The initial
+URL is checked with the existing robots rules before the browser starts. Blocked-page
+detection is heuristic; CAPTCHA, login, paywall, and bot-bypass behavior is unsupported.
+Only the loaded page is rendered; automatic pagination and infinite scrolling are
+not performed.
+
+Canvas-only or nearly empty rendered pages use a bounded in-memory screenshot. It is
+sent to the configured Nemotron vision model (OpenRouter free model in the runner),
+never to Gemini. Screenshot-derived values have a lower confidence cap and are marked
+with screenshot evidence; they are not DOM-verifiable and should be checked manually.
+Screenshots are not written to disk. Normal text extraction still uses Gemini.
 
 ## Python extraction API
 
@@ -209,10 +226,11 @@ unverified values become `null`; deterministic confidence is blended with model
 confidence. List items are deduplicated by their first three non-null values. A
 required-field, type, evidence, or low-confidence issue triggers at most one
 strong-model repair; repair output merges by item index so omitted valid fields
-survive. Pages marked for JavaScript rendering return a partial result with a
-warning rather than pretending static HTML is complete.
+survive. Screenshot-derived values are checked against their visual evidence quotes,
+not the DOM text.
 
-`data/cache.db` stores pages for 6 hours and results for 24 hours (WAL mode).
+`data/cache.db` stores static or rendered HTML pages for 6 hours and results for 24
+hours (WAL mode).
 Result identity includes URL, instruction, schema, provider/model settings, and
 relevant options. `RunOptions(force_refresh=True)` bypasses reads but still writes.
 The SQLite schema reserves a 7-day model-response cache, but automatic LLM response
@@ -244,10 +262,23 @@ the quota fields OpenRouter exposes. It can report free-model daily requests
 TPM/TPD remaining counters through that endpoint. 429 responses may provide the
 specific rate-limit headers and Retry-After value when a limit is actually hit.
 
-The runner requires `GEMINI_KEY` in the project `.env` for extraction. It reports
+Regular text extraction uses Gemini and requires `GEMINI_KEY` in the project `.env`.
+Screenshot vision uses Nemotron and can run without a Gemini key. The runner reports
 each call's model, tokens, latency, warnings, and recorded cost. Google
 free-tier quotas and billing depend on the AI Studio project; verify them there.
 Google may use free-tier prompts to improve its products.
+
+Browser rendering is automatic for detected JavaScript shells. Add `--browser` to
+force Chromium on a page that appears static, or `--no-browser` to stay with the
+ordinary HTTP fetch. For example:
+
+```powershell
+run_scout.bat --browser --url "https://quotes.toscrape.com/js/" --instruction "Extract each quote and its author."
+```
+
+Canvas vision requires the configured Nemotron Super VL model to advertise image
+input support. A missing Chromium installation produces an actionable warning; use
+`install_browser.bat` and retry. Browser navigation does not bypass 403/429 responses.
 
 ## Development checks
 

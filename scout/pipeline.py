@@ -1,5 +1,6 @@
 """End-to-end page extraction with evidence validation and one repair pass."""
 
+import base64
 import json
 import os
 import re
@@ -11,6 +12,7 @@ from typing import Any, cast
 
 from pydantic import SecretStr, ValidationError
 
+from scout.browser import BrowserRenderer
 from scout.cache import Cache, digest
 from scout.clean import CleanPage, clean_page
 from scout.config import Settings, load_settings
@@ -34,6 +36,7 @@ class RunOptions:
     force_refresh: bool = False
     max_items: int = 100
     force_browser: bool = False
+    use_browser: bool = True
     routing: str = "gemini"
 
 
@@ -115,6 +118,26 @@ def _messages(system: str, payload: str) -> ChatMessages:
     )
 
 
+def _vision_messages(system: str, payload: str, screenshot: bytes) -> ChatMessages:
+    image = base64.b64encode(screenshot).decode("ascii")
+    return cast(
+        ChatMessages,
+        [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": payload},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image}", "detail": "high"},
+                    },
+                ],
+            },
+        ],
+    )
+
+
 def _mode(plan: ExtractionPlan, instruction: str, groups: int) -> ExtractionPlan:
     mode = "list" if LIST_WORDS.search(instruction) or groups >= 3 else plan.mode
     return plan.model_copy(update={"mode": mode})
@@ -162,6 +185,7 @@ def run(
     options: RunOptions | None = None,
     *,
     fetcher: Any = None,
+    browser_renderer: Any = None,
     llm: LLMClient | None = None,
     cache: Cache | None = None,
     cache_path: str | Path = "data/cache.db",
@@ -200,11 +224,8 @@ def run(
         try:
             nemotron = ModelClient(settings)
             if options.routing == "gemini":
-                try:
-                    gemini = GeminiExtractionClient(os.getenv("GEMINI_KEY", ""))
-                except ScoutError:
-                    nemotron.close()
-                    raise
+                gemini_key = os.getenv("GEMINI_KEY", "").strip()
+                gemini = GeminiExtractionClient(gemini_key) if gemini_key else None
                 llm = ExtractionRouter(nemotron, gemini)
             else:
                 llm = nemotron
@@ -219,6 +240,8 @@ def run(
     page: CleanPage | None = None
     status_code = None
     tier = "http"
+    screenshot: bytes | None = None
+    vision_mode = False
     items = []
     result_key = digest(
         json.dumps(
@@ -232,11 +255,13 @@ def run(
                     "allow_localhost": options.allow_localhost,
                     "ignore_robots": options.ignore_robots,
                     "max_items": options.max_items,
+                    "force_browser": options.force_browser,
+                    "use_browser": options.use_browser,
                     "routing": options.routing,
                     "gemini_key_configured": bool(os.getenv("GEMINI_KEY", "").strip())
                     if options.routing == "gemini"
                     else False,
-                    "version": 2,
+                    "version": 3,
                 },
             },
             sort_keys=True,
@@ -262,6 +287,8 @@ def run(
                 )
 
         cached_page = None if options.force_refresh else cache.get_page(url)
+        if cached_page and cached_page[1] == "browser" and not options.use_browser:
+            cached_page = None
         if cached_page:
             html, tier = cached_page
             final_url = url
@@ -277,11 +304,73 @@ def run(
             warnings.append(
                 "Page appears blocked; CAPTCHA or bot-bypass attempts are not supported."
             )
-        elif options.force_browser or page.needs_render:
-            warnings.append(
-                "Page needs browser rendering; Playwright fallback is not implemented yet."
+            raise _PipelineStop
+        if options.force_browser or (options.use_browser and page.needs_render):
+            renderer = browser_renderer or BrowserRenderer(
+                user_agent=settings.user_agent,
+                allow_localhost=options.allow_localhost or settings.allow_localhost,
+                resolver=getattr(fetcher, "resolver", resolve_host),
             )
-        else:
+            try:
+                rendered = renderer.render(final_url, capture_screenshot=page.canvas_only)
+            except ScoutError as error:
+                warnings.append(f"Browser rendering failed: {error}")
+                if page.needs_render:
+                    raise _PipelineStop from None
+            else:
+                warnings.extend(rendered.warnings)
+                if rendered.status_code in {403, 429}:
+                    warnings.append(
+                        f"Browser navigation returned HTTP {rendered.status_code}; "
+                        "no bypass attempted."
+                    )
+                    raise _PipelineStop
+                html, final_url, status_code, tier = (
+                    rendered.html,
+                    rendered.final_url,
+                    rendered.status_code,
+                    "browser",
+                )
+                page = clean_page(html, final_url)
+                warnings.extend(page.warnings)
+                cache.set_page(url, html, tier)
+                warnings.append(
+                    "Rendered with headless Chromium after detecting browser-only content."
+                )
+                if page.blocked:
+                    warnings.append(
+                        "Rendered page appears blocked; CAPTCHA or bot-bypass attempts "
+                        "are not supported."
+                    )
+                    raise _PipelineStop
+                vision_mode = page.canvas_only or page.needs_render or len(page.source_text) < 200
+                if vision_mode and rendered.screenshot is None:
+                    try:
+                        rendered = renderer.render(final_url, capture_screenshot=True)
+                    except ScoutError as error:
+                        warnings.append(f"Screenshot capture failed: {error}")
+                        raise _PipelineStop from None
+                    warnings.extend(rendered.warnings)
+                screenshot = rendered.screenshot
+                if rendered.screenshot_truncated:
+                    warnings.append(
+                        "Screenshot was limited to the visible viewport; "
+                        "lower-page content was omitted."
+                    )
+                if vision_mode and screenshot is None:
+                    warnings.append(
+                        "Browser render has little extractable text and no screenshot was captured."
+                    )
+                    raise _PipelineStop
+                if vision_mode:
+                    tier = "browser+vision"
+                    warnings.append(
+                        "Screenshot-derived values are not DOM-verifiable; verify them manually."
+                    )
+        elif page.needs_render:
+            warnings.append("Page needs browser rendering, but browser rendering is disabled.")
+            raise _PipelineStop
+        if not page.blocked and (vision_mode or not page.needs_render):
             representation = build_representation(page, max_items=options.max_items)
             groups = find_candidate_groups(page)
             if schema is None:
@@ -313,9 +402,16 @@ def run(
                         "The supplied schema could not be converted to an extraction plan."
                     )
                 plan = _mode(supplied_plan, instruction, len(groups))
-            system = (PROMPTS / "extract.md").read_text(encoding="utf-8")
+            system = (PROMPTS / ("vision.md" if vision_mode else "extract.md")).read_text(
+                encoding="utf-8"
+            )
             payload = json.dumps(
-                {"instruction": instruction, "schema": plan.model_dump(), "page": representation},
+                {
+                    "instruction": instruction,
+                    "schema": plan.model_dump(),
+                    "max_items": options.max_items,
+                    **({} if vision_mode else {"page": representation}),
+                },
                 ensure_ascii=False,
             )
             raw = None
@@ -332,9 +428,12 @@ def run(
                         role = "strong"
                     response = llm.chat(
                         "extract",
-                        _messages(system, payload),
-                        role=role,
+                        _vision_messages(system, payload, screenshot)
+                        if vision_mode and screenshot is not None
+                        else _messages(system, payload),
+                        role="strong" if vision_mode else role,
                         max_tokens=8192 if plan.mode == "list" else 4096,
+                        require_vision=vision_mode,
                     )
                     raw = parse_json(response.text)
                     break
@@ -342,7 +441,7 @@ def run(
                     warnings.append(f"Extraction attempt {attempt + 1} failed: {error}")
                     if attempt == 1:
                         raise _PipelineStop
-            validation = validate_items(raw, plan, page.source_text)
+            validation = validate_items(raw, plan, page.source_text, vision=vision_mode)
             items = validation.items
             warnings.extend(validation.errors)
             average = sum(item.confidence for item in items) / len(items) if items else 0
@@ -365,14 +464,22 @@ def run(
                         },
                         ensure_ascii=False,
                     )
+                    repair_messages = (
+                        _vision_messages(repair_system, repair_payload, screenshot)
+                        if vision_mode and screenshot is not None
+                        else _messages(repair_system, repair_payload)
+                    )
                     repaired_response = llm.chat(
                         "repair",
-                        _messages(repair_system, repair_payload),
+                        repair_messages,
                         role="strong",
                         max_tokens=8192,
+                        require_vision=vision_mode,
                     )
                     repaired = _merge_repair(raw, parse_json(repaired_response.text))
-                    repaired_validation = validate_items(repaired, plan, page.source_text)
+                    repaired_validation = validate_items(
+                        repaired, plan, page.source_text, vision=vision_mode
+                    )
                     items = repaired_validation.items
                     warnings.extend(repaired_validation.errors)
                 except (ScoutError, ValueError) as error:

@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28,<1",
     "openai>=2,<3",
+    "playwright>=1.64.1",
     "pydantic>=2.11,<3",
     "python-dotenv>=1.1,<2",
     "selectolax>=0.3.29,<1",
