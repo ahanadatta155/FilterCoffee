@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, cast
 
 from openai import APIConnectionError, APIStatusError, OpenAI
-from openai.types.chat import ChatCompletionMessageParam
 from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from scout.config import Settings
@@ -19,7 +18,7 @@ from scout.errors import ConfigurationError, ModelError
 from scout.models import ModelInfo, price, resolve_models
 
 Role = Literal["fast", "strong", "escalation"]
-ChatMessages = list[ChatCompletionMessageParam]
+ChatMessages = list[dict[str, Any]]
 logger = logging.getLogger(__name__)
 
 
