@@ -8,6 +8,7 @@ import unicodedata
 from scout import extract
 from scout.config import load_settings
 from scout.contracts import ExtractedItem, FieldSpec
+from scout.discovery import DiscoveryResult, resolve_request
 from scout.errors import ScoutError
 from scout.limits import get_openrouter_key_status
 from scout.pipeline import RunOptions
@@ -42,7 +43,12 @@ def _table(items: list[ExtractedItem], fields: list[FieldSpec]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", help="Page to scrape; prompts if omitted")
-    parser.add_argument("--instruction", help="Data to extract; prompts if omitted")
+    parser.add_argument(
+        "--request",
+        "--instruction",
+        dest="request",
+        help="What to find and extract; interpreted when --url is omitted",
+    )
     parser.add_argument(
         "--max-items", type=int, default=20, help="Maximum rows to ask the model for"
     )
@@ -65,13 +71,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        url = args.url or input(f"Website URL [{DEFAULT_URL}]: ").strip() or DEFAULT_URL
-        instruction = (
-            args.instruction
-            or input(f"What data should I extract? [{DEFAULT_INSTRUCTION}]: ").strip()
-            or DEFAULT_INSTRUCTION
-        )
-        print("Checking OpenRouter quota, then fetching and extracting...", flush=True)
+        print("Checking OpenRouter quota and preparing the request...", flush=True)
         try:
             status = get_openrouter_key_status(
                 settings.api_key.get_secret_value(), settings.base_url
@@ -80,6 +80,43 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[debug] OpenRouter: {line}", flush=True)
         except (RuntimeError, ValueError) as error:
             print(f"[debug] OpenRouter quota check unavailable: {error}", flush=True)
+        discovery: DiscoveryResult | None = None
+        if args.url:
+            url = args.url
+            instruction = (
+                args.request
+                or input(f"What data should I extract? [{DEFAULT_INSTRUCTION}]: ").strip()
+                or DEFAULT_INSTRUCTION
+            )
+        else:
+            request = args.request or input("What would you like me to find? ").strip()
+            if request:
+                discovery = resolve_request(request, settings=settings)
+                url, instruction = discovery.url, discovery.instruction
+                print(f"[request] Mode: {_display(discovery.route)}")
+                if discovery.query:
+                    print(f"[search] Query: {_display(discovery.query)}")
+                    print(f"[search] Results considered: {discovery.search_result_count}")
+                print(
+                    f"[search] Selected page: {_display(discovery.title or discovery.url)} "
+                    f"| {_display(discovery.url)}"
+                )
+                for stage, response in (
+                    ("discover", discovery.intent_response),
+                    ("discover_select", discovery.selection_response),
+                ):
+                    if response is not None:
+                        print(
+                            f"[debug] {stage} | {_display(response.model)} | "
+                            f"{response.prompt_tokens} input / {response.completion_tokens} output "
+                            f"tokens | {response.latency_ms} ms"
+                        )
+                if discovery.query:
+                    print(f"[debug] Web search: {discovery.search_latency_ms} ms")
+            else:
+                url, instruction = DEFAULT_URL, DEFAULT_INSTRUCTION
+                print(f"Using sample page: {url}")
+        print("Fetching and extracting one page...", flush=True)
         result = extract(
             url,
             instruction,
@@ -112,10 +149,11 @@ def main(argv: list[str] | None = None) -> int:
         f"| Cache hit: {result.meta.cache_hit} | Extractor: {extractor}"
     )
     print(
-        f"Model calls: {len(result.meta.model_calls)} | Cost: ${result.meta.estimated_cost_usd:.4f}"
+        f"Extraction model calls: {len(result.meta.model_calls)} "
+        f"| Recorded extraction cost: ${result.meta.estimated_cost_usd:.4f}"
     )
     print(
-        f"[debug] Elapsed: {elapsed:.2f} seconds | Tokens: "
+        f"[debug] Elapsed: {elapsed:.2f} seconds | Extraction tokens: "
         f"{result.meta.prompt_tokens} input / {result.meta.completion_tokens} output"
     )
     for call in result.meta.model_calls:

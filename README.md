@@ -1,15 +1,15 @@
 # Nemotron Scout
 
-Point it at a public web page, describe the data you want in plain English,
-and get a verified table and JSON.
+Describe what you want in plain English and get a verified table from one public web
+page. Scout can resolve a named site or general topic to a single page before scraping.
 
-## Current stage: backend foundations
+## Current stage: one-page discovery and extraction
 
-Implemented: configuration for Nebius, OpenRouter, and NVIDIA; model discovery;
+Implemented: configuration for Nebius, OpenRouter, NVIDIA, and Tavily Search; model discovery;
 an OpenAI-compatible model adapter; key/model CLI diagnostics; and Pydantic v2
 contracts. The adapter handles retries, JSON parsing, model fallback, and per-call
-token/cost/latency accounting. The extraction pipeline, browser fallback, extraction
-CLI commands, and UI are not implemented yet.
+token/cost/latency accounting. Nemotron classifies a free-form request, Tavily Search
+locates one candidate page, and the existing extraction pipeline scrapes that page.
 
 Also implemented: guarded HTTP fetching, robots rules, rate limiting, HTML cleaning,
 JSON-LD/tables, repeated-item detection, and bounded page representations. The product
@@ -37,7 +37,7 @@ Python 3.12 or 3.13 and `uv` are required. The project currently uses Python 3.1
 ```powershell
 uv sync
 Copy-Item .env.example .env
-# Edit .env and set NEBIUS_API_KEY, OPENROUTER_KEY, or NVIDIA_API_KEY.
+# Edit .env: set OPENROUTER_KEY, GEMINI_KEY, and TAVILY_API_KEY.
 uv run python scripts/check_env.py
 uv run python -c "import scout; print('ok')"
 ```
@@ -47,7 +47,8 @@ or double-click `install_browser.bat`. This downloads browser binaries (a few hu
 MB); Node.js/npm are not required.
 
 `check_env.py` only prints whether each key is present or absent. It does not
-authenticate with any provider. It exits with code 1 when all keys are absent.
+authenticate with any provider. It exits with code 1 when all model-provider keys are
+absent; a Tavily key alone cannot run the extraction model.
 Never paste API keys into terminal commands or commit `.env`.
 
 Without `uv`:
@@ -239,22 +240,27 @@ as runtime data even though `data/` is gitignored.
 
 ## One-click live test (Windows)
 
-Double-click `run_scout.bat` in the project folder. It prompts for a public page
-URL and a plain-English description of the data you want. Press Enter to use the
-Books to Scrape sample values. Nemotron plans the fields; Gemini 3.5 Flash-Lite
-extracts them; Nemotron handles repair if needed. The runner prints a table and
-evidence quotes, then keeps the window open. It refuses to start if
+Double-click `run_scout.bat` in the project folder. It asks what you want to find.
+Nemotron interprets the request: an explicitly supplied URL is read directly, a named
+website is searched with a site restriction, and a topic without a site uses general
+web search. Tavily returns up to five candidate pages; Nemotron picks one actual result
+URL. Scout then scrapes only that page with the existing evidence checks. Press Enter
+on an empty prompt to use the Books to Scrape sample. Gemini 3.5 Flash-Lite extracts
+text; Nemotron handles planning, candidate selection, repair, and screenshot vision.
+The runner prints the interpreted search, chosen URL, table, and evidence quotes, then
+keeps the window open. It refuses to start if
 `SCOUT_PROVIDER` selects Nebius or NVIDIA. To run non-interactively from PowerShell:
 
 ```powershell
-uv run python run_scout.py --url "https://books.toscrape.com/" --instruction "Extract each book's title, price, rating, and availability."
+run_scout.bat --request "Search Wikipedia for Minecraft and extract its release date."
 ```
 
 Use `run_scout.bat --refresh` (or add `--refresh` to the PowerShell command) to
-fetch and extract again instead of using the cached result. `--url URL` and
-`--instruction "..."` can be supplied separately; omitted values prompt in the
-terminal. No schema is hard-coded: Nemotron plans fields from the request and
-page signals. This is terminal output, not the Streamlit UI, which is a later stage.
+fetch and extract again instead of using the cached result. `--url URL --instruction
+"..."` keeps direct-page mode; `--request "..."` (or `--instruction` without a URL)
+uses request interpretation and URL discovery. No schema is hard-coded: Nemotron
+plans fields from the request and selected page. This is terminal output, not the
+Streamlit UI, which is a later stage.
 The runner makes a small authenticated OpenRouter key-status request before
 scraping, then prints total elapsed time, per-call token counts/model latency, and
 the quota fields OpenRouter exposes. It can report free-model daily requests
@@ -267,6 +273,16 @@ Screenshot vision uses Nemotron and can run without a Gemini key. The runner rep
 each call's model, tokens, latency, warnings, and recorded cost. Google
 free-tier quotas and billing depend on the AI Studio project; verify them there.
 Google may use free-tier prompts to improve its products.
+
+Natural-language URL discovery needs `TAVILY_API_KEY` in `.env`; direct `--url`
+mode does not. Tavily's free plan includes 1,000 basic searches per month, with no
+credit card required. Each search uses one credit. If the monthly free limit is
+reached, Scout stops searching until it resets; it does not switch to a paid plan.
+The model then chooses only among the returned URLs. The request and result snippets go to the
+configured OpenRouter Nemotron model. URLs are validated by Scout before fetching.
+**This first version still scrapes one page only**: even a broad topic returns one
+selected page, not a comparison or multi-source research report. Multi-page research
+is a later feature.
 
 Browser rendering is automatic for detected JavaScript shells. Add `--browser` to
 force Chromium on a page that appears static, or `--no-browser` to stay with the

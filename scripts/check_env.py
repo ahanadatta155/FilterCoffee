@@ -21,6 +21,8 @@ def main() -> int:
         exists = bool(os.getenv(name, "").strip())
         present.append(exists)
         print(f"{name}: {'present' if exists else 'absent'}")
+    tavily_status = "present" if os.getenv("TAVILY_API_KEY", "").strip() else "absent"
+    print(f"TAVILY_API_KEY: {tavily_status}")
     return 0 if any(present) else 1
 
 

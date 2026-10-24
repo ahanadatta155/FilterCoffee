@@ -25,5 +25,9 @@ class BrowserError(ScoutError):
     """A browser could not safely render the page."""
 
 
+class DiscoveryError(ScoutError):
+    """A request could not be resolved to a usable public page."""
+
+
 class RobotsError(FetchError):
     """Robots rules deny access or could not be verified."""
