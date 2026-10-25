@@ -69,6 +69,7 @@ class DiscoveryResult:
     search_latency_ms: int
     intent_response: LLMResponse
     selection_response: LLMResponse | None
+    search_provider: str = "none"
 
 
 class TavilySearchClient:
@@ -201,6 +202,7 @@ def resolve_request(
     settings: Settings | None = None,
     llm: LLMClient | None = None,
     search: Any = None,
+    search_provider: str = "tinyfish",
 ) -> DiscoveryResult:
     """Classify one request, search if needed, and select one real result URL."""
     if not request.strip():
@@ -237,14 +239,43 @@ def resolve_request(
                 intent.route, "", "", intent.url, intent.instruction, 0, 0, intent_response, None
             )
 
-        if search is None:
-            search = TavilySearchClient(os.getenv("TAVILY_API_KEY", ""))
         if not intent.query:
             raise DiscoveryError("Could not form a useful search query from that request.")
         query = intent.query
         domain = None
         if intent.route == "site_search":
             domain = _domain(intent.site_domain)
+            if domain in {"www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"}:
+                domain = "youtube.com"
+
+        if search is None:
+            if domain == "youtube.com":
+                from scout.youtube import YouTubeClient
+
+                search = YouTubeClient()
+                search_provider = "youtube"
+            elif search_provider in {"tinyfish", "auto"}:
+                tinyfish_key = os.getenv("TINYFISH_API_KEY", "").strip()
+                if tinyfish_key:
+                    from scout.tinyfish import TinyFishClient
+
+                    search = TinyFishClient(tinyfish_key)
+                    search_provider = "tinyfish"
+                elif os.getenv("TAVILY_API_KEY", "").strip():
+                    search = TavilySearchClient(os.getenv("TAVILY_API_KEY", ""))
+                    search_provider = "tavily"
+                elif search_provider == "auto":
+                    from scout.tinyfish import TinyFishClient
+
+                    search = TinyFishClient("")
+                else:
+                    from scout.tinyfish import TinyFishClient
+
+                    search = TinyFishClient("")
+            elif search_provider == "tavily":
+                search = TavilySearchClient(os.getenv("TAVILY_API_KEY", ""))
+            else:
+                raise ConfigurationError("Search provider must be tinyfish, tavily, or auto.")
 
         started = time.perf_counter()
         results = search.search(query, include_domains=[domain] if domain else None)
@@ -297,6 +328,7 @@ def resolve_request(
             search_latency_ms,
             intent_response,
             selection_response,
+            search_provider,
         )
     finally:
         if owned_search and search is not None:

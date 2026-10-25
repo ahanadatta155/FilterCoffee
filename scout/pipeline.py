@@ -23,7 +23,9 @@ from scout.gemini import ExtractionRouter, GeminiExtractionClient
 from scout.llm import ChatMessages, LLMClient, ModelClient, Role, parse_json
 from scout.represent import build_representation, find_candidate_groups
 from scout.security import resolve_host, validate_url
+from scout.tinyfish import TinyFishClient
 from scout.validate import validate_items
+from scout.youtube import YouTubeClient, is_youtube_url
 
 PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 LIST_WORDS = re.compile(r"\b(each|all|list|products|rows|every)\b", re.I)
@@ -38,6 +40,7 @@ class RunOptions:
     force_browser: bool = False
     use_browser: bool = True
     routing: str = "gemini"
+    fetch_backend: str = "auto"
 
 
 def _schema(value: dict[str, Any] | None) -> ExtractionPlan | None:
@@ -198,6 +201,12 @@ def run(
     """
     started = time.perf_counter()
     options = options or RunOptions()
+    if options.fetch_backend not in {"auto", "http", "tinyfish"}:
+        raise ValueError("fetch_backend must be auto, http, or tinyfish.")
+    if options.force_browser and options.fetch_backend == "tinyfish":
+        raise ValueError(
+            "force_browser uses local HTTP; it cannot be combined with tinyfish fetch."
+        )
     settings_error = None
     if settings is None:
         try:
@@ -215,10 +224,15 @@ def run(
             )
     cache = cache or Cache(cache_path)
     owned_fetcher = fetcher is None
-    fetcher = fetcher or Fetcher(
-        user_agent=settings.user_agent,
-        allow_localhost=options.allow_localhost or settings.allow_localhost,
-    )
+    source = "http"
+    if fetcher is None:
+        if is_youtube_url(url):
+            source = "youtube"
+        elif not options.force_browser and (
+            options.fetch_backend == "tinyfish"
+            or (options.fetch_backend == "auto" and os.getenv("TINYFISH_API_KEY", "").strip())
+        ):
+            source = "tinyfish"
     owned_llm = llm is None
     if llm is None and settings_error is None:
         try:
@@ -258,10 +272,11 @@ def run(
                     "force_browser": options.force_browser,
                     "use_browser": options.use_browser,
                     "routing": options.routing,
+                    "source": source,
                     "gemini_key_configured": bool(os.getenv("GEMINI_KEY", "").strip())
                     if options.routing == "gemini"
                     else False,
-                    "version": 3,
+                    "version": 4,
                 },
             },
             sort_keys=True,
@@ -286,18 +301,48 @@ def run(
                     update={"meta": restored.meta.model_copy(update={"cache_hit": True})}
                 )
 
-        cached_page = None if options.force_refresh else cache.get_page(url)
+        page_key = f"{source}:{url}"
+        cached_page = None if options.force_refresh else cache.get_page(page_key)
         if cached_page and cached_page[1] == "browser" and not options.use_browser:
             cached_page = None
         if cached_page:
-            html, tier = cached_page
-            final_url = url
+            encoded, tier = cached_page
+            stored = json.loads(encoded)
+            html, final_url = stored["html"], stored["url"]
+            status_code = stored["status_code"]
+            warnings.extend(stored["warnings"])
         else:
-            fetched = fetcher.fetch(url, ignore_robots=options.ignore_robots)
+            if fetcher is None:
+                if source == "tinyfish":
+                    fetcher = TinyFishClient(os.getenv("TINYFISH_API_KEY", ""), cache=cache)
+                elif source == "youtube":
+                    fetcher = YouTubeClient()
+                else:
+                    fetcher = Fetcher(
+                        user_agent=settings.user_agent,
+                        allow_localhost=options.allow_localhost or settings.allow_localhost,
+                    )
+            if source == "tinyfish":
+                fetched = fetcher.fetch(url, force_refresh=options.force_refresh)
+            elif source == "youtube":
+                fetched = fetcher.fetch(url)
+            else:
+                fetched = fetcher.fetch(url, ignore_robots=options.ignore_robots)
             html, final_url = fetched.html, fetched.url
             status_code, tier = fetched.status_code, fetched.tier
             warnings.extend(fetched.warnings)
-            cache.set_page(url, html, tier)
+            cache.set_page(
+                page_key,
+                json.dumps(
+                    {
+                        "html": html,
+                        "url": final_url,
+                        "status_code": status_code,
+                        "warnings": fetched.warnings,
+                    }
+                ),
+                tier,
+            )
         page = clean_page(html, final_url)
         warnings.extend(page.warnings)
         if page.blocked:
@@ -305,7 +350,9 @@ def run(
                 "Page appears blocked; CAPTCHA or bot-bypass attempts are not supported."
             )
             raise _PipelineStop
-        if options.force_browser or (options.use_browser and page.needs_render):
+        if source == "http" and (
+            options.force_browser or (options.use_browser and page.needs_render)
+        ):
             renderer = browser_renderer or BrowserRenderer(
                 user_agent=settings.user_agent,
                 allow_localhost=options.allow_localhost or settings.allow_localhost,
@@ -333,7 +380,18 @@ def run(
                 )
                 page = clean_page(html, final_url)
                 warnings.extend(page.warnings)
-                cache.set_page(url, html, tier)
+                cache.set_page(
+                    page_key,
+                    json.dumps(
+                        {
+                            "html": html,
+                            "url": final_url,
+                            "status_code": status_code,
+                            "warnings": rendered.warnings,
+                        }
+                    ),
+                    tier,
+                )
                 warnings.append(
                     "Rendered with headless Chromium after detecting browser-only content."
                 )
@@ -367,8 +425,13 @@ def run(
                     warnings.append(
                         "Screenshot-derived values are not DOM-verifiable; verify them manually."
                     )
-        elif page.needs_render:
+        elif source == "http" and page.needs_render:
             warnings.append("Page needs browser rendering, but browser rendering is disabled.")
+            raise _PipelineStop
+        if source != "http" and page.needs_render:
+            warnings.append(
+                "Source returned too little text; no browser/provider fallback attempted."
+            )
             raise _PipelineStop
         if not page.blocked and (vision_mode or not page.needs_render):
             representation = build_representation(page, max_items=options.max_items)
@@ -493,7 +556,7 @@ def run(
             f"Run could not complete ({type(error).__name__}); check the URL and configuration."
         )
     finally:
-        if owned_fetcher:
+        if owned_fetcher and fetcher is not None:
             fetcher.close()
         if owned_llm:
             llm.close()

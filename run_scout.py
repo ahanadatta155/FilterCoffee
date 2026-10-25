@@ -42,7 +42,19 @@ def _table(items: list[ExtractedItem], fields: list[FieldSpec]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", help="Page to scrape; prompts if omitted")
+    parser.add_argument("--url", help="Page/video to read directly, skipping URL discovery")
+    parser.add_argument(
+        "--search-provider",
+        choices=("tinyfish", "tavily", "auto"),
+        default="auto",
+        help="General web search provider (default: auto = tinyfish if key present else tavily); YouTube uses yt-dlp",
+    )
+    parser.add_argument(
+        "--fetch-backend",
+        choices=("auto", "http", "tinyfish"),
+        default="auto",
+        help="Page reader: auto uses TinyFish when its key is set; YouTube uses yt-dlp",
+    )
     parser.add_argument(
         "--request",
         "--instruction",
@@ -91,10 +103,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             request = args.request or input("What would you like me to find? ").strip()
             if request:
-                discovery = resolve_request(request, settings=settings)
+                discovery = resolve_request(
+                    request, settings=settings, search_provider=args.search_provider
+                )
                 url, instruction = discovery.url, discovery.instruction
                 print(f"[request] Mode: {_display(discovery.route)}")
                 if discovery.query:
+                    print(f"[search] Provider: {_display(discovery.search_provider)}")
                     print(f"[search] Query: {_display(discovery.query)}")
                     print(f"[search] Results considered: {discovery.search_result_count}")
                 print(
@@ -127,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                 force_browser=args.browser,
                 use_browser=args.use_browser,
                 routing="gemini",
+                fetch_backend=args.fetch_backend,
             ),
             settings=settings,
         )

@@ -33,6 +33,10 @@ class Cache:
                     prompt_hash TEXT PRIMARY KEY, response TEXT NOT NULL, model TEXT NOT NULL,
                     created_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS request_counts (
+                    scope TEXT NOT NULL, day INTEGER NOT NULL, count INTEGER NOT NULL,
+                    PRIMARY KEY (scope, day)
+                );
             """)
 
     def _connect(self) -> sqlite3.Connection:
@@ -56,6 +60,17 @@ class Cache:
 
     def get_page(self, url: str):
         return self._get("pages", "url_hash", digest(url), "html, tier", "fetched_at", 6 * 3600)
+
+    def reserve_request(self, scope: str, limit: int) -> bool:
+        """Atomically count attempts before network I/O; failed calls count too."""
+        day = int(self.clock() // 86400)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO request_counts VALUES (?, ?, 1) "
+                "ON CONFLICT(scope, day) DO UPDATE SET count=count+1 WHERE count < ?",
+                (scope, day, limit),
+            )
+            return cursor.rowcount == 1
 
     def set_page(self, url: str, html: str, tier: str) -> None:
         with self._connect() as connection:

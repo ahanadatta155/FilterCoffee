@@ -5,11 +5,13 @@ page. Scout can resolve a named site or general topic to a single page before sc
 
 ## Current stage: one-page discovery and extraction
 
-Implemented: configuration for Nebius, OpenRouter, NVIDIA, and Tavily Search; model discovery;
+Implemented: configuration for Nebius, OpenRouter, NVIDIA, TinyFish, and optional Tavily;
+model discovery;
 an OpenAI-compatible model adapter; key/model CLI diagnostics; and Pydantic v2
 contracts. The adapter handles retries, JSON parsing, model fallback, and per-call
-token/cost/latency accounting. Nemotron classifies a free-form request, Tavily Search
-locates one candidate page, and the existing extraction pipeline scrapes that page.
+token/cost/latency accounting. Nemotron classifies a free-form request, TinyFish Search
+locates candidate pages, and the extraction pipeline reads one selected page. YouTube
+requests use yt-dlp for video search, metadata, and available subtitles.
 
 Also implemented: guarded HTTP fetching, robots rules, rate limiting, HTML cleaning,
 JSON-LD/tables, repeated-item detection, and bounded page representations. The product
@@ -36,8 +38,9 @@ Python 3.12 or 3.13 and `uv` are required. The project currently uses Python 3.1
 
 ```powershell
 uv sync
+# Only if .env does not exist yet:
 Copy-Item .env.example .env
-# Edit .env: set OPENROUTER_KEY, GEMINI_KEY, and TAVILY_API_KEY.
+# Edit your existing .env: set OPENROUTER_KEY, GEMINI_KEY, and TINYFISH_API_KEY.
 uv run python scripts/check_env.py
 uv run python -c "import scout; print('ok')"
 ```
@@ -48,7 +51,7 @@ MB); Node.js/npm are not required.
 
 `check_env.py` only prints whether each key is present or absent. It does not
 authenticate with any provider. It exits with code 1 when all model-provider keys are
-absent; a Tavily key alone cannot run the extraction model.
+absent; a search key alone cannot run the extraction model.
 Never paste API keys into terminal commands or commit `.env`.
 
 Without `uv`:
@@ -144,6 +147,20 @@ validator checks evidence and computes deterministic confidence scores.
 
 ## Page ingestion
 
+`RunOptions(fetch_backend="auto")` selects TinyFish Fetch when `TINYFISH_API_KEY`
+is set; otherwise it uses the local guarded HTTP/Playwright path. YouTube URLs are
+handled by yt-dlp in either case. `fetch_backend="http"` explicitly selects the local
+page reader, and `fetch_backend="tinyfish"` requires the TinyFish key. `force_browser`
+selects local HTTP/Chromium and cannot be combined with explicit TinyFish fetching.
+Injected test fetchers retain their existing behavior.
+
+TinyFish receives the public URL and returns extracted HTML, not the full original
+DOM. Scout verifies quotes against that returned content and labels the source
+`tinyfish`. It does not independently verify TinyFish's server-side robots handling.
+Original and final URLs are checked for unsafe addresses. The local HTTP robots
+check described below applies to the local reader, not TinyFish or yt-dlp.
+No blocked request automatically switches to a different provider or browser.
+
 ```text
 URL -> DNS/address checks -> robots.txt -> throttled HTTP + manual redirects
     -> cleaned text / JSON-LD / tables -> repeated blocks -> compact representation
@@ -230,8 +247,10 @@ strong-model repair; repair output merges by item index so omitted valid fields
 survive. Screenshot-derived values are checked against their visual evidence quotes,
 not the DOM text.
 
-`data/cache.db` stores static or rendered HTML pages for 6 hours and results for 24
-hours (WAL mode).
+`data/cache.db` stores static, rendered, TinyFish, or YouTube source documents for 6
+hours and results for 24 hours (WAL mode). Cached source documents preserve final URL,
+status and warnings, including missing-subtitle notices. Page and result caches are
+separated by selected source; old cache entries are not deleted.
 Result identity includes URL, instruction, schema, provider/model settings, and
 relevant options. `RunOptions(force_refresh=True)` bypasses reads but still writes.
 The SQLite schema reserves a 7-day model-response cache, but automatic LLM response
@@ -243,7 +262,7 @@ as runtime data even though `data/` is gitignored.
 Double-click `run_scout.bat` in the project folder. It asks what you want to find.
 Nemotron interprets the request: an explicitly supplied URL is read directly, a named
 website is searched with a site restriction, and a topic without a site uses general
-web search. Tavily returns up to five candidate pages; Nemotron picks one actual result
+web search. TinyFish returns candidates (Scout considers up to five); Nemotron picks one actual result
 URL. Scout then scrapes only that page with the existing evidence checks. Press Enter
 on an empty prompt to use the Books to Scrape sample. Gemini 3.5 Flash-Lite extracts
 text; Nemotron handles planning, candidate selection, repair, and screenshot vision.
@@ -274,19 +293,33 @@ each call's model, tokens, latency, warnings, and recorded cost. Google
 free-tier quotas and billing depend on the AI Studio project; verify them there.
 Google may use free-tier prompts to improve its products.
 
-Natural-language URL discovery needs `TAVILY_API_KEY` in `.env`; direct `--url`
-mode does not. Tavily's free plan includes 1,000 basic searches per month, with no
-credit card required. Each search uses one credit. If the monthly free limit is
-reached, Scout stops searching until it resets; it does not switch to a paid plan.
-The model then chooses only among the returned URLs. The request and result snippets go to the
-configured OpenRouter Nemotron model. URLs are validated by Scout before fetching.
+General URL discovery defaults to TinyFish and needs `TINYFISH_API_KEY` in `.env`.
+Direct `--url` skips search, but can still use TinyFish Fetch when the key is present.
+`--search-provider tavily` explicitly selects the existing Tavily search adapter and
+requires `TAVILY_API_KEY`; it is never used as an automatic fallback. Selecting a
+search provider does not change the page reader: use `--fetch-backend http` for local
+HTTP/Playwright or `--fetch-backend tinyfish` for TinyFish.
+
+TinyFish Search/Fetch have published free allowances, but its pricing page and API
+reference differ about over-allowance billing. Scout conservatively stops at **100
+search attempts and 100 fetch attempts per key per UTC day**, persisted atomically in
+`data/cache.db`. Failed calls count too; clearing cached pages/results does not reset
+the counters. This is a local guard, not an account-wide billing guarantee: other
+apps, copies of this database, deleted databases, or keys can consume allowances
+outside it. Check your TinyFish account's free limits and disable paid overage/automatic
+reload where available. Scout never calls Agent, Browser, Research, wallet funding,
+or payment endpoints and does not retry allowance/rate-limit denials.
+
+The request and search snippets go to the configured OpenRouter Nemotron model.
+Only a returned candidate may be selected; its URL is checked before fetching.
 **This first version still scrapes one page only**: even a broad topic returns one
 selected page, not a comparison or multi-source research report. Multi-page research
 is a later feature.
 
-Browser rendering is automatic for detected JavaScript shells. Add `--browser` to
-force Chromium on a page that appears static, or `--no-browser` to stay with the
-ordinary HTTP fetch. For example:
+On the local reader, browser rendering is automatic for detected JavaScript shells.
+Add `--browser` to force local Chromium, or `--fetch-backend http --no-browser` for
+static-only local fetching. `--no-browser` disables local Chromium, not TinyFish's
+server-side rendering. For example:
 
 ```powershell
 run_scout.bat --browser --url "https://quotes.toscrape.com/js/" --instruction "Extract each quote and its author."
@@ -295,6 +328,29 @@ run_scout.bat --browser --url "https://quotes.toscrape.com/js/" --instruction "E
 Canvas vision requires the configured Nemotron Super VL model to advertise image
 input support. A missing Chromium installation produces an actionable warning; use
 `install_browser.bat` and retry. Browser navigation does not bypass 403/429 responses.
+
+### YouTube search and subtitles
+
+```powershell
+run_scout.bat --request "Find a YouTube video about Python decorators and extract its title and channel."
+run_scout.bat --url "https://www.youtube.com/watch?v=jNQXAC9IVRw" --instruction "Extract the title, channel, upload date, and subtitle text."
+```
+
+A request that names YouTube uses yt-dlp search (up to five video candidates), then
+reads one selected video. A direct YouTube video URL skips search. No TinyFish/Tavily
+key, Node/npm, FFmpeg, browser login, or Whisper key is needed for this path. yt-dlp
+runs in a subprocess with a 60-second metadata deadline, user config/plugins disabled,
+and a guarded proxy. It never downloads video/audio or imports browser cookies.
+JavaScript runtimes are disabled; some YouTube extraction paths may therefore fail.
+
+Manual captions are preferred over automatic captions, with English preferred within
+each kind, then another available language. One JSON3 subtitle track is read, never
+transcribed from audio. The output warns whether subtitles are manual, automatic, or
+unavailable. Missing/failed captions leave metadata only; Scout does not claim to have
+watched the video. Captions are size-bounded and target-validated, and access denials
+or rate limits are not retried through another service. Returned metadata and subtitle
+text are escaped into a source document for the normal schema/extraction/evidence
+flow and its cache. Exa/Jina and GitHub/Reddit connectors are not implemented.
 
 ## Development checks
 

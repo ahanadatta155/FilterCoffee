@@ -23,6 +23,8 @@ def main() -> int:
         print(f"{name}: {'present' if exists else 'absent'}")
     tavily_status = "present" if os.getenv("TAVILY_API_KEY", "").strip() else "absent"
     print(f"TAVILY_API_KEY: {tavily_status}")
+    tinyfish_status = "present" if os.getenv("TINYFISH_API_KEY", "").strip() else "absent"
+    print(f"TINYFISH_API_KEY: {tinyfish_status}")
     return 0 if any(present) else 1
 
 

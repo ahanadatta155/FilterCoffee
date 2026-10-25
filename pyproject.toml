@@ -16,6 +16,7 @@ dependencies = [
     "selectolax>=0.3.29,<1",
     "tenacity>=9,<10",
     "trafilatura>=2,<3",
+    "yt-dlp>=2026.10.21",
 ]
 
 [dependency-groups]
