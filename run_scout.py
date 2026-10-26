@@ -183,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
                     f"[search] Selected page: {_display(discovery.title or discovery.url)} "
                     f"| {_display(discovery.url)}"
                 )
+                for warning in getattr(discovery, "warnings", ()):
+                    print(f"[search] Warning: {_display(warning)}")
                 for stage, response in (
                     ("discover", discovery.intent_response),
                     ("discover_select", discovery.selection_response),

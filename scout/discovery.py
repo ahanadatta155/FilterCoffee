@@ -70,6 +70,7 @@ class DiscoveryResult:
     intent_response: LLMResponse
     selection_response: LLMResponse | None
     search_provider: str = "none"
+    warnings: tuple[str, ...] = ()
 
 
 class TavilySearchClient:
@@ -296,6 +297,8 @@ def resolve_request(
             }
             for index, result in enumerate(candidates)
         ]
+        selection_warnings: list[str] = []
+        selection_response: LLMResponse | None = None
         try:
             selection_response = llm.chat(
                 "discover_select",
@@ -313,11 +316,19 @@ def resolve_request(
                 max_tokens=1024,
             )
             selection = CandidateSelection.model_validate(parse_json(selection_response.text))
-        except (ScoutError, ValidationError, ValueError) as error:
-            raise DiscoveryError(f"Could not choose a search result: {error}") from None
-        if selection.candidate_index >= len(candidates):
-            raise DiscoveryError("The model could not choose a search result from the candidates.")
-        chosen = candidates[selection.candidate_index]
+        except (ScoutError, ValidationError, ValueError):
+            selection_warnings.append(
+                "Could not choose among search results; using the top result instead."
+            )
+            chosen = candidates[0]
+        else:
+            if selection.candidate_index >= len(candidates):
+                selection_warnings.append(
+                    "The selected result was invalid; using the top result instead."
+                )
+                chosen = candidates[0]
+            else:
+                chosen = candidates[selection.candidate_index]
         return DiscoveryResult(
             intent.route,
             f"site:{domain} {query}" if domain else query,
@@ -329,6 +340,7 @@ def resolve_request(
             intent_response,
             selection_response,
             search_provider,
+            tuple(selection_warnings),
         )
     finally:
         if owned_search and search is not None:
