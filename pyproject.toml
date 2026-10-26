@@ -19,6 +19,11 @@ dependencies = [
     "yt-dlp>=2026.10.21",
 ]
 
+[project.optional-dependencies]
+# Optional stealth Chromium renderer. The first launch downloads a patched
+# Chromium (~200 MB) and the free build requires a one-time GitHub sign-in.
+cloak = ["cloakbrowser>=0.6.4,<0.7"]
+
 [dependency-groups]
 dev = ["pytest>=8,<10", "respx>=0.22,<1", "ruff>=0.12,<1"]
 

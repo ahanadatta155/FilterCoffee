@@ -103,6 +103,13 @@ class Fetcher:
             warnings.append("robots.txt check explicitly disabled; use only on sites you own.")
         return FetchedPage(final, text, status, content_type, warnings=warnings)
 
+    def check_robots(self, url: str, *, ignore_robots: bool = False) -> None:
+        """Apply the same robots policy to an alternate renderer such as CloakBrowser."""
+        if ignore_robots:
+            return
+        target = validate_url(url, allow_localhost=self.allow_localhost, resolver=self.resolver)
+        self.robots.check(target.url, self.user_agent, self._robots_download)
+
     def _robots_download(self, url: str) -> tuple[int, str]:
         _, status, _, text = self._download(url, check_robots=False)
         return status, text

@@ -11,7 +11,9 @@ from scout.contracts import ExtractedItem, FieldSpec
 from scout.discovery import DiscoveryResult, resolve_request
 from scout.errors import ScoutError
 from scout.limits import get_openrouter_key_status
+from scout.manual import ManualFetcher
 from scout.pipeline import RunOptions
+from scout.research import research
 
 DEFAULT_URL = "https://books.toscrape.com/"
 DEFAULT_INSTRUCTION = "Extract each book's title, price, rating, and availability."
@@ -47,7 +49,10 @@ def main(argv: list[str] | None = None) -> int:
         "--search-provider",
         choices=("tinyfish", "tavily", "auto"),
         default="auto",
-        help="General web search provider (default: auto = tinyfish if key present else tavily); YouTube uses yt-dlp",
+        help=(
+            "General web search provider (default: auto = tinyfish if key present else tavily); "
+            "YouTube uses yt-dlp"
+        ),
     )
     parser.add_argument(
         "--fetch-backend",
@@ -62,6 +67,32 @@ def main(argv: list[str] | None = None) -> int:
         help="What to find and extract; interpreted when --url is omitted",
     )
     parser.add_argument(
+        "--sources",
+        help=(
+            "Research across free sources instead of one page: auto, or a comma list of "
+            "hn, stackexchange, github, bluesky, web, opencli"
+        ),
+    )
+    parser.add_argument(
+        "--source-limit", type=int, default=5, help="Maximum results per research source"
+    )
+    parser.add_argument(
+        "--manual",
+        metavar="PATH",
+        help=(
+            "Extract from a local .txt, .md, or .html file you saved yourself "
+            "(for example, a Reddit thread)"
+        ),
+    )
+    parser.add_argument(
+        "--manual-url",
+        help="Original public URL to use in evidence links for --manual",
+    )
+    parser.add_argument(
+        "--manual-title",
+        help="Title for a text or Markdown manual import",
+    )
+    parser.add_argument(
         "--max-items", type=int, default=20, help="Maximum rows to ask the model for"
     )
     parser.add_argument(
@@ -74,6 +105,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.set_defaults(use_browser=True)
     args = parser.parse_args(argv)
+    if args.url and args.sources:
+        print("--url and --sources cannot be combined.", file=sys.stderr)
+        return 1
+    if args.manual and (args.url or args.sources):
+        print("--manual cannot be combined with --url or --sources.", file=sys.stderr)
+        return 1
+    if args.manual_url and not args.manual:
+        print("--manual-url requires --manual.", file=sys.stderr)
+        return 1
+    if args.manual_title and not args.manual:
+        print("--manual-title requires --manual.", file=sys.stderr)
+        return 1
     started = time.perf_counter()
     try:
         settings = load_settings()
@@ -93,7 +136,31 @@ def main(argv: list[str] | None = None) -> int:
         except (RuntimeError, ValueError) as error:
             print(f"[debug] OpenRouter quota check unavailable: {error}", flush=True)
         discovery: DiscoveryResult | None = None
-        if args.url:
+        research_request: str | None = None
+        research_sources: list[str] | None = None
+        manual_fetcher: ManualFetcher | None = None
+        if args.manual:
+            instruction = (
+                args.request
+                or input(f"What data should I extract? [{DEFAULT_INSTRUCTION}]: ").strip()
+                or DEFAULT_INSTRUCTION
+            )
+            manual_fetcher = ManualFetcher(
+                args.manual, citation_url=args.manual_url, title=args.manual_title
+            )
+            url = manual_fetcher.url
+            print(f"[manual] Loaded local file: {_display(args.manual)}")
+        elif args.sources:
+            if args.sources.strip().lower() != "auto":
+                research_sources = [
+                    name.strip() for name in args.sources.split(",") if name.strip()
+                ]
+            research_request = args.request or input("What would you like me to research? ").strip()
+            if not research_request:
+                print("--sources requires a request describing what to find.", file=sys.stderr)
+                return 1
+            url, instruction = "", research_request
+        elif args.url:
             url = args.url
             instruction = (
                 args.request
@@ -131,21 +198,37 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 url, instruction = DEFAULT_URL, DEFAULT_INSTRUCTION
                 print(f"Using sample page: {url}")
-        print("Fetching and extracting one page...", flush=True)
-        result = extract(
-            url,
-            instruction,
-            schema=None,
-            options=RunOptions(
-                max_items=args.max_items,
-                force_refresh=args.refresh,
-                force_browser=args.browser,
-                use_browser=args.use_browser,
-                routing="gemini",
-                fetch_backend=args.fetch_backend,
-            ),
-            settings=settings,
+        options = RunOptions(
+            max_items=args.max_items,
+            force_refresh=args.refresh,
+            force_browser=args.browser,
+            use_browser=args.use_browser,
+            routing="gemini",
+            fetch_backend=args.fetch_backend,
         )
+        if manual_fetcher is not None:
+            print("Extracting from the local import...", flush=True)
+            result = extract(
+                url,
+                instruction,
+                schema=None,
+                fetcher=manual_fetcher,
+                options=options,
+                settings=settings,
+            )
+        elif research_request is not None:
+            print(f"Researching across sources ({_display(args.sources)})...", flush=True)
+            result = research(
+                research_request,
+                settings=settings,
+                source_names=research_sources,
+                search_provider=args.search_provider,
+                limit=max(1, min(args.source_limit, 10)),
+                options=options,
+            )
+        else:
+            print("Fetching and extracting one page...", flush=True)
+            result = extract(url, instruction, schema=None, options=options, settings=settings)
     except (ScoutError, ValueError) as error:
         print(f"Could not start Nemotron Scout: {error}", file=sys.stderr)
         return 1
@@ -164,6 +247,15 @@ def main(argv: list[str] | None = None) -> int:
         f"Fetch: {result.meta.fetch_tier} | Items: {len(result.items)} "
         f"| Cache hit: {result.meta.cache_hit} | Extractor: {extractor}"
     )
+    for report in getattr(result.meta, "sources", []):
+        print(
+            f"[research] {_display(report.name)}: {report.status} | "
+            f"{report.hits} hit(s) | {report.latency_ms} ms"
+        )
+        for warning in report.warnings:
+            print(f"[research] {_display(report.name)}: {_display(warning)}")
+    if result.meta.fetch_tier == "manual":
+        print("[manual] No network request was made for the imported file.")
     print(
         f"Extraction model calls: {len(result.meta.model_calls)} "
         f"| Recorded extraction cost: ${result.meta.estimated_cost_usd:.4f}"

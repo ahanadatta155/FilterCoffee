@@ -12,6 +12,7 @@ FieldType = Literal["string", "number", "integer", "boolean", "date", "url", "li
 Confidence = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
 NonnegativeFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 NonnegativeInt = Annotated[int, Field(ge=0)]
+SourceState = Literal["ok", "empty", "unavailable", "error"]
 
 
 class FieldSpec(BaseModel):
@@ -62,6 +63,16 @@ class ModelCall(BaseModel):
     ok: bool
 
 
+class SourceReport(BaseModel):
+    """Per-source outcome for one research run."""
+
+    name: str
+    status: SourceState
+    hits: NonnegativeInt = 0
+    latency_ms: NonnegativeInt = 0
+    warnings: list[str] = Field(default_factory=list)
+
+
 class RunMeta(BaseModel):
     run_id: str
     url: str
@@ -75,6 +86,7 @@ class RunMeta(BaseModel):
     latency_ms: NonnegativeInt = 0
     cache_hit: bool = False
     warnings: list[str] = Field(default_factory=list)
+    sources: list[SourceReport] = Field(default_factory=list)
 
 
 class ExtractResult(BaseModel):

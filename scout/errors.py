@@ -29,5 +29,9 @@ class DiscoveryError(ScoutError):
     """A request could not be resolved to a usable public page."""
 
 
+class SourceError(ScoutError):
+    """A research source is unavailable or returned an unusable result."""
+
+
 class RobotsError(FetchError):
     """Robots rules deny access or could not be verified."""

@@ -7,16 +7,24 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
 from pydantic import SecretStr, ValidationError
 
-from scout.browser import BrowserRenderer
+from scout.browser import make_renderer
 from scout.cache import Cache, digest
 from scout.clean import CleanPage, clean_page
 from scout.config import Settings, load_settings
-from scout.contracts import ExtractionPlan, ExtractResult, FieldSpec, ModelCall, RunMeta
+from scout.contracts import (
+    ExtractionPlan,
+    ExtractResult,
+    FieldSpec,
+    ModelCall,
+    RunMeta,
+    SourceReport,
+)
 from scout.errors import ScoutError
 from scout.fetch import Fetcher
 from scout.gemini import ExtractionRouter, GeminiExtractionClient
@@ -85,13 +93,45 @@ def _fallback_plan(instruction: str, schema: dict[str, Any] | None) -> Extractio
         provided = None
     if provided:
         return provided
-    name = re.sub(r"[^a-z0-9]+", "_", instruction.lower()).strip("_")[:35] or "result"
-    if name[0].isdigit():
-        name = f"field_{name}"
+    name = _field_name(instruction)[:35].rstrip("_") or "result"
     return ExtractionPlan(
         mode="list" if LIST_WORDS.search(instruction) else "single",
         fields=[FieldSpec(name=name, type="string", description=instruction)],
     )
+
+
+def _normalize_plan(payload: Any) -> Any:
+    """Turn model-provided field names into valid, unique snake_case identifiers."""
+    if not isinstance(payload, dict):
+        return payload
+    fields = payload.get("fields")
+    if not isinstance(fields, list):
+        return payload
+    seen: set[str] = set()
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        raw = field.get("name")
+        if not isinstance(raw, str):
+            continue
+        base = _field_name(raw)
+        name = base
+        suffix = 2
+        while name in seen:
+            name = f"{base}_{suffix}"
+            suffix += 1
+        seen.add(name)
+        field["name"] = name
+    return payload
+
+
+def _field_name(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+    if not slug:
+        return "field"
+    if not slug[0].isalpha():
+        return f"field_{slug}"
+    return slug
 
 
 def _plan_prompt(instruction: str, page: CleanPage, representation: str) -> str:
@@ -233,6 +273,9 @@ def run(
             or (options.fetch_backend == "auto" and os.getenv("TINYFISH_API_KEY", "").strip())
         ):
             source = "tinyfish"
+    else:
+        # Injected adapters (research) declare their own cache namespace.
+        source = getattr(fetcher, "source_name", "http")
     owned_llm = llm is None
     if llm is None and settings_error is None:
         try:
@@ -288,11 +331,12 @@ def run(
     try:
         if settings_error:
             raise _PipelineStop
-        validate_url(
-            url,
-            allow_localhost=options.allow_localhost or settings.allow_localhost,
-            resolver=getattr(fetcher, "resolver", resolve_host),
-        )
+        if not getattr(fetcher, "trusted_url", False):
+            validate_url(
+                url,
+                allow_localhost=options.allow_localhost or settings.allow_localhost,
+                resolver=getattr(fetcher, "resolver", resolve_host),
+            )
         if not options.force_refresh:
             cached = cache.get_result(result_key)
             if cached is not None:
@@ -353,10 +397,17 @@ def run(
         if source == "http" and (
             options.force_browser or (options.use_browser and page.needs_render)
         ):
-            renderer = browser_renderer or BrowserRenderer(
+            check_robots = getattr(fetcher, "check_robots", None)
+            robots_check = (
+                partial(check_robots, ignore_robots=options.ignore_robots)
+                if check_robots is not None
+                else None
+            )
+            renderer = browser_renderer or make_renderer(
                 user_agent=settings.user_agent,
                 allow_localhost=options.allow_localhost or settings.allow_localhost,
                 resolver=getattr(fetcher, "resolver", resolve_host),
+                robots_check=robots_check,
             )
             try:
                 rendered = renderer.render(final_url, capture_screenshot=page.canvas_only)
@@ -448,9 +499,11 @@ def run(
                             "plan",
                             plan_messages,
                             role="strong" if len(instruction) > 160 or len(groups) > 2 else "fast",
-                            max_tokens=2048,
+                            max_tokens=4096,
                         )
-                        planned = ExtractionPlan.model_validate(parse_json(plan_response.text))
+                        planned = ExtractionPlan.model_validate(
+                            _normalize_plan(parse_json(plan_response.text))
+                        )
                         break
                     except (ScoutError, ValidationError, ValueError) as error:
                         warnings.append(f"Schema planning attempt {attempt + 1} failed: {error}")
@@ -562,7 +615,10 @@ def run(
             llm.close()
     final_url = page.url if page else url
     try:
-        call_slice = list(getattr(llm, "calls", []))[call_start:]
+        call_slice = (
+            list(getattr(fetcher, "prefix_calls", []))
+            + list(getattr(llm, "calls", []))[call_start:]
+        )
         model_calls = [
             call if isinstance(call, ModelCall) else ModelCall.model_validate(call)
             for call in call_slice
@@ -583,6 +639,10 @@ def run(
         estimated_cost_usd=cost,
         latency_ms=max(model_latency, int((time.perf_counter() - started) * 1000)),
         warnings=list(dict.fromkeys(warnings)),
+        sources=[
+            report if isinstance(report, SourceReport) else SourceReport.model_validate(report)
+            for report in getattr(fetcher, "reports", [])
+        ],
     )
     result = ExtractResult(
         url=final_url,

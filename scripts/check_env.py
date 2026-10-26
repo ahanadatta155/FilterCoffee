@@ -21,10 +21,16 @@ def main() -> int:
         exists = bool(os.getenv(name, "").strip())
         present.append(exists)
         print(f"{name}: {'present' if exists else 'absent'}")
-    tavily_status = "present" if os.getenv("TAVILY_API_KEY", "").strip() else "absent"
-    print(f"TAVILY_API_KEY: {tavily_status}")
-    tinyfish_status = "present" if os.getenv("TINYFISH_API_KEY", "").strip() else "absent"
-    print(f"TINYFISH_API_KEY: {tinyfish_status}")
+    for name in (
+        "TAVILY_API_KEY",
+        "TINYFISH_API_KEY",
+        "GEMINI_KEY",
+        "GITHUB_TOKEN",
+        "STACKEXCHANGE_KEY",
+        "CLOAKBROWSER_LICENSE_KEY",
+    ):
+        exists = bool(os.getenv(name, "").strip())
+        print(f"{name}: {'present' if exists else 'absent'}")
     return 0 if any(present) else 1
 
 

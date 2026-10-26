@@ -1,9 +1,11 @@
 # Nemotron Scout
 
 Describe what you want in plain English and get a verified table from one public web
-page. Scout can resolve a named site or general topic to a single page before scraping.
+page or from several free research sources at once. Scout can resolve a named site or
+general topic to a single page, or search Hacker News, Stack Exchange, GitHub, Bluesky,
+and the general web, then combine the results into one evidence page.
 
-## Current stage: one-page discovery and extraction
+## Current stage: single-page and multi-source research
 
 Implemented: configuration for Nebius, OpenRouter, NVIDIA, TinyFish, and optional Tavily;
 model discovery;
@@ -12,6 +14,12 @@ contracts. The adapter handles retries, JSON parsing, model fallback, and per-ca
 token/cost/latency accounting. Nemotron classifies a free-form request, TinyFish Search
 locates candidate pages, and the extraction pipeline reads one selected page. YouTube
 requests use yt-dlp for video search, metadata, and available subtitles.
+
+The multi-source research layer plans one query and one extraction instruction, searches
+free public APIs, renders the hits as one bounded evidence page, and reports per-source
+coverage. Hacker News, Stack Exchange, GitHub, and Bluesky need no key. The optional web
+source uses TinyFish Search, or Tavily when TinyFish is not configured. OpenCLI and
+CloakBrowser are opt-in, and Reddit automated access is intentionally unsupported.
 
 Also implemented: guarded HTTP fetching, robots rules, rate limiting, HTML cleaning,
 JSON-LD/tables, repeated-item detection, and bounded page representations. The product
@@ -40,7 +48,8 @@ Python 3.12 or 3.13 and `uv` are required. The project currently uses Python 3.1
 uv sync
 # Only if .env does not exist yet:
 Copy-Item .env.example .env
-# Edit your existing .env: set OPENROUTER_KEY, GEMINI_KEY, and TINYFISH_API_KEY.
+# Edit your existing .env: set OPENROUTER_KEY and GEMINI_KEY.
+# Set TINYFISH_API_KEY or TAVILY_API_KEY for general web search and page reading.
 uv run python scripts/check_env.py
 uv run python -c "import scout; print('ok')"
 ```
@@ -48,6 +57,17 @@ uv run python -c "import scout; print('ok')"
 For JavaScript pages, install Chromium once with `uv run playwright install chromium`
 or double-click `install_browser.bat`. This downloads browser binaries (a few hundred
 MB); Node.js/npm are not required.
+
+CloakBrowser is an optional stealth Chromium renderer. It is not installed by default:
+
+```powershell
+uv sync --extra cloak
+```
+
+The first launch downloads a patched Chromium (about 200 MB). The free binary can run
+without a key; the latest build may offer a one-time GitHub sign-in for one concurrent
+session. Scout keeps it behind `SCOUT_CLOAKBROWSER=1`, applies the same robots check, and
+never solves CAPTCHAs or rotates proxies.
 
 `check_env.py` only prints whether each key is present or absent. It does not
 authenticate with any provider. It exits with code 1 when all model-provider keys are
@@ -257,6 +277,75 @@ The SQLite schema reserves a 7-day model-response cache, but automatic LLM respo
 reuse is not enabled yet. The page cache contains fetched HTML locally; treat it
 as runtime data even though `data/` is gitignored.
 
+## Multi-source research
+
+`--sources` switches from one page to a planned search across free public sources:
+
+```powershell
+run_scout.bat --sources auto --request "Find recent Python CLI projects and their star counts."
+run_scout.bat --sources hn,github --source-limit 5 --request "What are people saying about uv?"
+run_scout.bat --sources stackexchange,web --request "How do I stream responses from FastAPI?"
+```
+
+Available names are `hn`, `stackexchange`, `github`, `bluesky`, `web`, and `opencli`.
+`auto` lets the planner choose one to three of the available sources. Each source returns
+at most `--source-limit` normalized hits (capped at 10). A single model call plans the
+query and extraction instruction; the combined evidence page then goes through the
+normal schema, extraction, validation, one-repair, and cache pipeline. The runner prints
+each source's status, hit count, latency, and warnings.
+
+The first four sources use public APIs and need no key. GitHub honours `GITHUB_TOKEN`
+when present, Stack Exchange honours `STACKEXCHANGE_KEY` and `STACKEXCHANGE_SITE`, and
+Bluesky uses its public AppView API. The `web` source needs `TINYFISH_API_KEY`, or
+`TAVILY_API_KEY` when TinyFish is absent. No source is silently replaced by an
+unavailable one; the coverage line shows what happened.
+
+Run the same thing from Python with `scout.research.research(...)`; pass `source_names`
+to override the planner. The combined result uses a synthetic
+`https://scout.local/research?...` URL and stores the real source hits in the HTML
+evidence page and in `result.meta.sources`.
+
+### Manual import (including Reddit)
+
+Reddit is not an automated source. To analyse a thread or page you saved yourself,
+write the text to a local `.txt` or `.md` file, or save the page as `.html`, then attach
+the original public URL for evidence links:
+
+```powershell
+run_scout.bat --manual .\saved-thread.md --manual-url "https://www.reddit.com/r/Python/comments/..." --request "Extract each commenter's main recommendation."
+```
+
+The file is read locally; Scout makes no network request for it and does not log in or
+scrape Reddit. The citation URL is metadata only and is checked to be HTTP(S). HTML
+files are used as-is; text and Markdown are split into paragraphs with a source header.
+Use `--manual-title "..."` to set the heading when the file has no `# Title` line.
+
+### OpenCLI and CloakBrowser
+
+Install OpenCLI with Node.js 20.18+:
+
+```powershell
+npm install -g @jackwener/opencli
+# If npm blocks the postinstall adapter fetch:
+npm install -g --allow-scripts=@jackwener/opencli @jackwener/opencli
+```
+
+Scout resolves the npm `.cmd` shim on Windows. Browser-backed commands need the OpenCLI
+Chrome extension connected; browserless commands such as Hacker News search work without
+it.
+
+`opencli` is available only when `SCOUT_ENABLE_OPENCLI=1`, a site is named, and that site
+is present in `SCOUT_OPENCLI_ALLOWLIST`; `opencli` must also be on `PATH` or set with
+`SCOUT_OPENCLI_BIN`. Reddit and generic browser commands are hard-blocked. Scout starts
+OpenCLI as a subprocess with a timeout and parses JSON output; it does not import Agent
+Reach state or share its browser profile.
+
+CloakBrowser is selected only with `SCOUT_CLOAKBROWSER=1` after `uv sync --extra cloak`.
+It is a drop-in Playwright browser behind the same loopback proxy: private destinations,
+non-GET/HEAD requests, and unsafe navigations are blocked; downloads and dialogs are
+denied; robots rules are checked before launch. It is not a CAPTCHA solver and Scout
+does not add residential proxies or retry a denial through another browser.
+
 ## One-click live test (Windows)
 
 Double-click `run_scout.bat` in the project folder. It asks what you want to find.
@@ -293,12 +382,13 @@ each call's model, tokens, latency, warnings, and recorded cost. Google
 free-tier quotas and billing depend on the AI Studio project; verify them there.
 Google may use free-tier prompts to improve its products.
 
-General URL discovery defaults to TinyFish and needs `TINYFISH_API_KEY` in `.env`.
-Direct `--url` skips search, but can still use TinyFish Fetch when the key is present.
-`--search-provider tavily` explicitly selects the existing Tavily search adapter and
-requires `TAVILY_API_KEY`; it is never used as an automatic fallback. Selecting a
-search provider does not change the page reader: use `--fetch-backend http` for local
-HTTP/Playwright or `--fetch-backend tinyfish` for TinyFish.
+General URL discovery uses TinyFish when `TINYFISH_API_KEY` is set. With
+`--search-provider auto`, it falls back to Tavily when TinyFish is absent and
+`TAVILY_API_KEY` is present. `--search-provider tavily` forces Tavily. If neither key
+is set, discovery stops with a configuration error. Direct `--url` skips search, but
+can still use TinyFish Fetch when the key is present. Selecting a search provider does
+not change the page reader: use `--fetch-backend http` for local HTTP/Playwright or
+`--fetch-backend tinyfish` for TinyFish.
 
 TinyFish Search/Fetch have published free allowances, but its pricing page and API
 reference differ about over-allowance billing. Scout conservatively stops at **100
@@ -312,9 +402,9 @@ or payment endpoints and does not retry allowance/rate-limit denials.
 
 The request and search snippets go to the configured OpenRouter Nemotron model.
 Only a returned candidate may be selected; its URL is checked before fetching.
-**This first version still scrapes one page only**: even a broad topic returns one
-selected page, not a comparison or multi-source research report. Multi-page research
-is a later feature.
+Without `--sources`, Scout still selects and reads one page. With `--sources`, it
+searches several free sources and combines them into one evidence page; see
+"Multi-source research" above. `--sources` does not run candidate-page selection.
 
 On the local reader, browser rendering is automatic for detected JavaScript shells.
 Add `--browser` to force local Chromium, or `--fetch-backend http --no-browser` for
@@ -350,7 +440,8 @@ unavailable. Missing/failed captions leave metadata only; Scout does not claim t
 watched the video. Captions are size-bounded and target-validated, and access denials
 or rate limits are not retried through another service. Returned metadata and subtitle
 text are escaped into a source document for the normal schema/extraction/evidence
-flow and its cache. Exa/Jina and GitHub/Reddit connectors are not implemented.
+flow and its cache. GitHub, Hacker News, Stack Exchange, and Bluesky connectors are
+implemented. Reddit remains manual-import only; Exa/Jina connectors are not implemented.
 
 ## Development checks
 
@@ -369,6 +460,8 @@ but the installed project package is now `scout`.
 
 ## Intended limits
 
-Public pages only; no login, paywall, CAPTCHA bypass, proxies, or personal-data
-scraping. Robots rules will be respected by default. Page content must always be
-treated as data, never as instructions.
+Public pages only; no login, paywall, CAPTCHA solving, external proxy rotation, or
+personal-data scraping. Reddit automated access is intentionally unsupported; use
+`--manual` for a file you saved yourself. OpenCLI and CloakBrowser are opt-in and keep
+their robots and allowlist gates. Page content must always be treated as data, never as
+instructions.
