@@ -42,6 +42,44 @@ the startup resolver checks them against the selected provider.
 
 ## Setup (PowerShell)
 
+### Local web workspace (Windows)
+
+Double-click **`run_scout_web.bat`** to open the working Scout interface in your browser.
+Keep its launcher window open while using the app; Ctrl+C in that window stops it.
+The original `run_scout.bat` remains available for the console interface.
+
+The workspace uses the existing Python environment and `.env`. No Node build, hosting,
+separate login, or new API keys are required. It listens only on `127.0.0.1:8765` and uses
+a private per-launch session token. It is a local development tool, not a public server.
+If that port is occupied, close the earlier launcher or run `uv run python -m scout.web
+--port 8766` from the project directory. Do not expose it through a tunnel or port forward.
+
+- Enter a request normally, or choose specific research sources in the sidebar.
+- Auto finds one page/video; Choose sources combines bounded API search results.
+  YouTube is a separate video search. OpenCLI becomes an additional research source.
+- OpenCLI defaults to the allowlisted, browserless Hacker News search if no site is set.
+  Custom sites still use `SCOUT_OPENCLI_SITE`, `SCOUT_OPENCLI_COMMAND`, and the explicit
+  `.env` allowlist. The UI never accepts arbitrary executable commands or changes `.env`.
+  Browser-backed OpenCLI sites may use the browser session connected to its extension.
+- Page rendering can be automatic, disabled, or forced to Chromium/CloakBrowser. Forced
+  rendering uses the local HTTP reader, not TinyFish. Source APIs, YouTube and file imports
+  do not use a page-rendering browser. CloakBrowser must be installed before selecting it.
+- Response, Table and Evidence tabs display the same returned data without model calls.
+  Long fields expand; unverified values are labeled rather than filled in.
+- Copy Markdown, download JSON/CSV, and reopen the latest 30 saved runs. History is stored
+  in `data/workspace.db`, including extracted text and evidence. Original uploaded files
+  are temporary; their extracted content can remain in history and the existing cache.
+- A run is independent of previous messages. Only one run executes at a time. Closing a
+  tab does not cancel an active run; reopening the app can reconnect to its progress.
+- The quota Check button reads OpenRouter's key-status endpoint, without inference.
+  Usage can lag, and no model calls happen just from opening the workspace.
+
+The dark/light theme and non-secret search preferences are stored in your browser.
+Credentials stay in Python; do not put keys or sensitive files into the request box.
+Page content and imported text are still sent to your configured model/service providers.
+
+### Python environment
+
 Python 3.12 or 3.13 and `uv` are required. The project currently uses Python 3.13.
 
 ```powershell

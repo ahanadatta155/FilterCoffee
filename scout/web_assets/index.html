@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>FilterCoffee · research workspace</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <svg class="icon-library" aria-hidden="true">
+      <defs>
+        <symbol id="i-cup" viewBox="0 0 24 24">
+          <path
+            d="M4 9h12v5a6 6 0 0 1-12 0Zm12 1h2a3 3 0 1 1 0 6h-2M3 22h16M7 2v3M12 2v3"
+          />
+        </symbol>
+        <symbol id="i-search" viewBox="0 0 24 24">
+          <circle cx="10.5" cy="10.5" r="6.5" />
+          <path d="m16 16 5 5" />
+        </symbol>
+        <symbol id="i-plus" viewBox="0 0 24 24">
+          <path d="M12 5v14M5 12h14" />
+        </symbol>
+        <symbol id="i-chat" viewBox="0 0 24 24">
+          <path
+            d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-5 3V6a2 2 0 0 1 2-2Z"
+          />
+        </symbol>
+        <symbol id="i-table" viewBox="0 0 24 24">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M3 10h18M10 10v10" />
+        </symbol>
+        <symbol id="i-file" viewBox="0 0 24 24">
+          <path d="M14 3H5v18h14V8ZM14 3v5h5M8 12h8M8 16h6" />
+        </symbol>
+        <symbol id="i-arrow" viewBox="0 0 24 24">
+          <path d="M7 17 17 7M7 7h10v10" />
+        </symbol>
+        <symbol id="i-theme" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" />
+          <path
+            d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"
+          />
+        </symbol>
+        <symbol id="i-menu" viewBox="0 0 24 24">
+          <path d="M4 6h16M4 12h16M4 18h16" />
+        </symbol>
+        <symbol id="i-copy" viewBox="0 0 24 24">
+          <rect x="8" y="8" width="12" height="13" rx="2" />
+          <path d="M5 16H3V3h13v2" />
+        </symbol>
+        <symbol id="i-download" viewBox="0 0 24 24">
+          <path d="M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4" />
+        </symbol>
+        <symbol id="i-check" viewBox="0 0 24 24">
+          <path d="m5 12 4 4L19 6" />
+        </symbol>
+        <symbol id="i-info" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 11v6M12 7h.01" />
+        </symbol>
+      </defs>
+    </svg>
+    <a class="skip" href="#request">Skip to request</a>
+    <header class="brandbar">
+      <div class="brand">
+        <button
+          class="icon-button mobile-menu"
+          id="menu-toggle"
+          aria-label="Show workspace controls"
+          aria-expanded="false"
+          aria-controls="sidebar"
+        >
+          <svg><use href="#i-menu" /></svg></button
+        ><svg class="mark" aria-hidden="true"><use href="#i-cup" /></svg
+        >FilterCoffee
+        <span class="pill">LOCAL WORKSPACE</span>
+      </div>
+      <div class="top-actions">
+        <span class="connection" id="connection"
+          ><i class="dot"></i> Connecting</span
+        ><button
+          id="theme"
+          class="icon-button"
+          aria-label="Switch to light mode"
+          title="Switch theme"
+        >
+          <svg><use href="#i-theme" /></svg>
+        </button>
+      </div>
+    </header>
+    <div class="workspace">
+      <aside class="left" id="sidebar" aria-label="Workspace controls">
+        <button class="new" id="new-run">
+          New research <svg aria-hidden="true"><use href="#i-plus" /></svg>
+        </button>
+        <section>
+          <h2 class="section-label">Recent sessions</h2>
+          <div id="history">
+            <p class="subtle">Your research will appear here.</p>
+          </div>
+        </section>
+        <section class="settings">
+          <h2 class="section-label">Search scope</h2>
+          <label class="field-label" for="mode">Where to look</label>
+          <select id="mode">
+            <option value="auto">Auto · find a page or video</option>
+            <option value="sources">Choose sources</option>
+            <option value="url">Read a specific URL</option>
+            <option value="manual">Import saved page</option>
+          </select>
+          <p class="subtle" id="scope-help">
+            FilterCoffee finds one relevant page or video. Mention YouTube in
+            your request to search for a video.
+          </p>
+          <div id="source-options" hidden>
+            <label class="switch-row"
+              >Web
+              <input
+                type="checkbox"
+                value="web"
+                class="source-toggle"
+                checked /><span class="switch-track" aria-hidden="true"></span
+            ></label>
+            <label class="switch-row"
+              >GitHub
+              <input
+                type="checkbox"
+                value="github"
+                class="source-toggle" /><span
+                class="switch-track"
+                aria-hidden="true"
+              ></span
+            ></label>
+            <label class="switch-row"
+              >Hacker News
+              <input type="checkbox" value="hn" class="source-toggle" /><span
+                class="switch-track"
+                aria-hidden="true"
+              ></span
+            ></label>
+            <label class="switch-row"
+              >Stack Exchange
+              <input
+                type="checkbox"
+                value="stackexchange"
+                class="source-toggle" /><span
+                class="switch-track"
+                aria-hidden="true"
+              ></span
+            ></label>
+            <label class="switch-row"
+              >Bluesky
+              <input
+                type="checkbox"
+                value="bluesky"
+                class="source-toggle" /><span
+                class="switch-track"
+                aria-hidden="true"
+              ></span
+            ></label>
+            <label class="switch-row"
+              >YouTube
+              <input
+                type="checkbox"
+                value="youtube"
+                class="source-toggle" /><span
+                class="switch-track"
+                aria-hidden="true"
+              ></span
+            ></label>
+            <p class="subtle">
+              Combine public research sources, or choose YouTube on its own.
+            </p>
+          </div>
+          <div id="url-options" hidden>
+            <label class="field-label" for="page-url">Public page URL</label
+            ><input
+              id="page-url"
+              type="url"
+              placeholder="https://example.com/page"
+              maxlength="2000"
+            />
+          </div>
+          <div id="import-options" hidden>
+            <label class="field-label" for="import-file"
+              >Saved text or HTML · up to 5 MiB</label
+            ><input
+              id="import-file"
+              type="file"
+              accept=".txt,.md,.markdown,.html,.htm"
+            /><label class="field-label" for="citation-url"
+              >Original URL (optional)</label
+            ><input id="citation-url" type="url" placeholder="https://…" />
+          </div>
+        </section>
+        <section class="settings">
+          <h2 class="section-label">Browser tools</h2>
+          <label class="switch-row"
+            >OpenCLI <input id="opencli" type="checkbox" /><span
+              class="switch-track"
+              aria-hidden="true"
+            ></span
+          ></label>
+          <p class="subtle" id="opencli-help">
+            Use for site-specific searches.
+          </p>
+        </section>
+        <section class="settings">
+          <h2 class="section-label" id="rendering-heading">Page rendering</h2>
+          <select id="browser" aria-labelledby="rendering-heading">
+            <option value="auto">Auto · Chromium if needed</option>
+            <option value="off">No browser</option>
+            <option value="chromium">Force Chromium</option>
+            <option value="cloak">Force CloakBrowser</option>
+          </select>
+          <p class="subtle">Use a browser for pages that need it.</p>
+        </section>
+        <details class="settings advanced">
+          <summary>Run settings</summary>
+          <label class="field-label" for="max-items">Maximum rows</label
+          ><input
+            id="max-items"
+            type="number"
+            min="1"
+            max="100"
+            value="5"
+          /><label class="field-label" for="source-limit"
+            >Hits per research source</label
+          ><input
+            id="source-limit"
+            type="number"
+            min="1"
+            max="10"
+            value="5"
+          /><label class="check-row"
+            ><input id="refresh" type="checkbox" /> Bypass cached results</label
+          >
+        </details>
+        <div class="quota">
+          <div class="quota-line">
+            <span>OpenRouter quota</span
+            ><button id="quota-refresh" class="text-button">Check</button>
+          </div>
+          <div id="quota-value">Not checked</div>
+          <meter id="quota-meter" min="0" max="50" value="0" hidden></meter
+          ><small id="quota-note">Checking quota does not run a model.</small>
+          <small id="quota-reset">Resets daily at 00:00 UTC (GMT).</small>
+        </div>
+      </aside>
+      <main id="main">
+        <nav class="tabs" role="tablist" aria-label="Result views">
+          <button
+            class="tab"
+            id="response-tab"
+            role="tab"
+            aria-selected="true"
+            aria-controls="response"
+          >
+            <svg aria-hidden="true"><use href="#i-chat" /></svg>Response
+          </button>
+          <button
+            class="tab"
+            id="table-tab"
+            role="tab"
+            aria-selected="false"
+            aria-controls="table"
+            tabindex="-1"
+          >
+            <svg aria-hidden="true"><use href="#i-table" /></svg>Table
+          </button>
+          <button
+            class="tab"
+            id="evidence-tab"
+            role="tab"
+            aria-selected="false"
+            aria-controls="evidence"
+            tabindex="-1"
+          >
+            <svg aria-hidden="true"><use href="#i-file" /></svg>Evidence
+          </button>
+        </nav>
+        <div class="conversation" id="conversation">
+          <section id="welcome">
+            <div class="eyebrow">Your research workspace</div>
+            <h1>What are we looking into?</h1>
+            <p class="welcome-copy">
+              Find a page, explore a topic, or turn a video into something you
+              can read. FilterCoffee keeps the sources close.
+            </p>
+            <div class="suggestions">
+              <button
+                data-example="Find me a YouTube video about PyTorch tutorials and extract its title, channel, upload date, and available captions."
+              >
+                <svg aria-hidden="true"><use href="#i-search" /></svg
+                ><span
+                  >Find a PyTorch tutorial<small
+                    >Video metadata + available captions</small
+                  ></span
+                ><svg aria-hidden="true"><use href="#i-arrow" /></svg></button
+              ><button
+                data-example="Read https://books.toscrape.com/ and extract each book's title and price."
+              >
+                <svg aria-hidden="true"><use href="#i-table" /></svg
+                ><span
+                  >Turn a page into a table<small
+                    >Book titles and prices from a public page</small
+                  ></span
+                ><svg aria-hidden="true"><use href="#i-arrow" /></svg>
+              </button>
+            </div>
+            <p class="privacy-note">
+              Runs use your configured free-tier services. Page text and
+              requests are sent to the model providers. Keep private information
+              out of your requests.
+            </p>
+          </section>
+          <div id="run-heading" hidden>
+            <div class="eyebrow" id="run-label">Research</div>
+            <h1 class="question" id="question"></h1>
+            <div class="query-meta" id="query-meta"></div>
+            <div class="rule"></div>
+          </div>
+          <div id="run-status" role="status" aria-live="polite" hidden></div>
+          <div id="error" class="error-box" role="alert" hidden></div>
+          <section
+            id="response"
+            role="tabpanel"
+            aria-labelledby="response-tab"
+          ></section>
+          <section
+            id="table"
+            role="tabpanel"
+            aria-labelledby="table-tab"
+            hidden
+          ></section>
+          <section
+            id="evidence"
+            role="tabpanel"
+            aria-labelledby="evidence-tab"
+            hidden
+          ></section>
+        </div>
+        <div class="composer-area">
+          <form id="composer" class="composer">
+            <label for="request">Your request</label
+            ><textarea
+              id="request"
+              rows="2"
+              maxlength="6000"
+              placeholder="Ask FilterCoffee to find and extract something…"
+              required
+            ></textarea>
+            <div class="composer-bottom">
+              <span id="composer-scope">Auto · one page or video</span
+              ><button
+                id="submit"
+                class="search-button"
+                type="submit"
+                aria-label="Start research"
+                title="Start research (Ctrl+Enter)"
+              >
+                <svg aria-hidden="true"><use href="#i-search" /></svg>
+              </button>
+            </div>
+            <p id="form-error" class="form-error" role="alert" hidden></p>
+          </form>
+          <p class="composer-note">
+            Each request is a new run · Ctrl+Enter to search · Browsing history
+            does not use quota
+          </p>
+        </div>
+      </main>
+      <aside class="right" aria-label="Run inspector">
+        <div class="inspector-title">
+          Run inspector <svg aria-hidden="true"><use href="#i-info" /></svg>
+        </div>
+        <h2 class="section-label">Activity</h2>
+        <ol id="activity" class="trace">
+          <li class="muted">The steps of your next run will appear here.</li>
+        </ol>
+        <div id="metrics" class="metrics"></div>
+        <section id="exports" hidden>
+          <h2 class="section-label">Keep your findings</h2>
+          <button id="copy" class="tiny-button">
+            <svg aria-hidden="true"><use href="#i-copy" /></svg>Copy Markdown</button
+          ><button id="json-export" class="tiny-button">
+            <svg aria-hidden="true"><use href="#i-download" /></svg>Download
+            JSON</button
+          ><button id="csv-export" class="tiny-button">
+            <svg aria-hidden="true"><use href="#i-download" /></svg>Download CSV
+          </button>
+        </section>
+        <details id="diagnostics" hidden>
+          <summary>Model calls &amp; warnings</summary>
+          <div id="diagnostic-content"></div>
+        </details>
+        <p class="local-note">History is stored locally.</p>
+      </aside>
+    </div>
+    <footer class="statusbar">
+      <span><i class="dot"></i> Local workspace</span
+      ><span id="footer-status">Ready when you are</span
+      ><span>Nemotron + Gemini</span>
+    </footer>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>
