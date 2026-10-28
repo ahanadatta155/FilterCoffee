@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from scout.browser import BrowserRenderer, CloakBrowserRenderer
+from scout.cache import Cache, digest
 from scout.config import load_environment, load_settings
 from scout.contracts import ExtractResult
 from scout.discovery import resolve_request
@@ -225,6 +226,7 @@ def execute_request(
             return current_usage(result, client)
 
         discovery = None
+        discovery_payload: dict[str, Any] | None = None
         fetcher = None
         instruction = request.request
         url = request.url
@@ -240,11 +242,34 @@ def execute_request(
             if request.sources == ["youtube"]:
                 query = f"Search YouTube for a video: {query}"
             emit("Searching", "Finding a public page or video for your request.")
-            discovery = resolve_request(
-                query, settings=settings, llm=client, search_provider="auto"
-            )
-            url, instruction = discovery.url, discovery.instruction
-            emit("Selected source", f"{discovery.title or url} · {url}")
+            cache = Cache(cache_path)
+            discovery_key = digest("discover:v1:" + " ".join(query.casefold().split()))
+            saved = None if request.refresh else cache.get_discovery(discovery_key)
+            if saved:
+                url = saved["url"]
+                instruction = saved.get("instruction") or request.request
+                discovery_payload = saved
+                emit("Selected source", f"{saved.get('title') or url} · {url}")
+                emit(
+                    "Reused saved search",
+                    "Same request, same source. Enable Refresh to search again.",
+                )
+            else:
+                discovery = resolve_request(
+                    query, settings=settings, llm=client, search_provider="auto"
+                )
+                url, instruction = discovery.url, discovery.instruction
+                emit("Selected source", f"{discovery.title or url} · {url}")
+                discovery_payload = {
+                    "provider": discovery.search_provider,
+                    "query": discovery.query,
+                    "candidates": discovery.search_result_count,
+                    "title": discovery.title,
+                    "url": discovery.url,
+                    "instruction": discovery.instruction,
+                    "warnings": list(discovery.warnings),
+                }
+                cache.set_discovery(discovery_key, discovery_payload)
         renderer = None
         if request.browser in {"chromium", "cloak"}:
             if request.browser == "cloak" and find_spec("cloakbrowser") is None:
@@ -277,15 +302,21 @@ def execute_request(
         )
         if discovery:
             result.meta.warnings = list(dict.fromkeys([*discovery.warnings, *result.meta.warnings]))
+        elif discovery_payload:
+            result.meta.warnings = list(
+                dict.fromkeys([*discovery_payload.get("warnings", []), *result.meta.warnings])
+            )
         if request.mode == "manual" and not request.url:
             result.url = result.meta.url = "manual:" + request.filename
         output = current_usage(result, client)
-        if discovery:
+        if discovery_payload:
             output["discovery"] = {
-                "provider": discovery.search_provider,
-                "query": discovery.query,
-                "candidates": discovery.search_result_count,
-                "title": discovery.title,
+                "provider": discovery_payload.get("provider", "cache"),
+                "query": discovery_payload.get("query", ""),
+                "candidates": discovery_payload.get("candidates", 0),
+                "title": discovery_payload.get("title", ""),
+                "url": discovery_payload.get("url", url),
+                "reused": discovery is None,
             }
         return output
 

@@ -37,6 +37,9 @@ class Cache:
                     scope TEXT NOT NULL, day INTEGER NOT NULL, count INTEGER NOT NULL,
                     PRIMARY KEY (scope, day)
                 );
+                CREATE TABLE IF NOT EXISTS discoveries (
+                    key TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at REAL NOT NULL
+                );
             """)
 
     def _connect(self) -> sqlite3.Connection:
@@ -90,6 +93,18 @@ class Cache:
                 (key, json.dumps(result, ensure_ascii=False), self.clock()),
             )
 
+    def get_discovery(self, key: str, ttl: int = 6 * 3600) -> dict[str, Any] | None:
+        """Reuse one search decision per request so repeat runs keep the same source."""
+        row = self._get("discoveries", "key", key, "payload", "created_at", ttl)
+        return json.loads(row[0]) if row else None
+
+    def set_discovery(self, key: str, payload: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO discoveries VALUES (?, ?, ?)",
+                (key, json.dumps(payload, ensure_ascii=False), self.clock()),
+            )
+
     def get_llm(self, prompt_hash: str):
         return self._get(
             "llm", "prompt_hash", prompt_hash, "response, model", "created_at", 7 * 24 * 3600
@@ -104,5 +119,5 @@ class Cache:
 
     def clear(self) -> None:
         with self._connect() as connection:
-            for table in ("pages", "results", "llm"):
+            for table in ("pages", "results", "llm", "discoveries"):
                 connection.execute(f"DELETE FROM {table}")
