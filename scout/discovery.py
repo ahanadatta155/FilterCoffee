@@ -46,9 +46,40 @@ class RequestIntent(BaseModel):
 
 
 class CandidateSelection(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
-    candidate_index: int = Field(ge=0, strict=True)
+    candidate_index: int = Field(ge=0)
+
+
+_SELECTION_KEYS = (
+    "candidate_index",
+    "index",
+    "candidate",
+    "candidate_id",
+    "selected_index",
+    "choice",
+)
+
+
+def _selection(payload: Any) -> CandidateSelection:
+    """Coerce the selector model's reply into a candidate index."""
+    if isinstance(payload, list) and payload:
+        payload = payload[0]
+    if not isinstance(payload, dict):
+        raise ValueError("Selection reply was not a JSON object.")
+    if isinstance(payload.get("selection"), dict):
+        payload = {**payload, **payload["selection"]}
+    raw = next((payload[key] for key in _SELECTION_KEYS if key in payload), None)
+    if isinstance(raw, dict):
+        raw = next((raw[key] for key in _SELECTION_KEYS if key in raw), None)
+    if raw is None or isinstance(raw, bool):
+        raise ValueError("Selection reply had no candidate index.")
+    if isinstance(raw, int):
+        return CandidateSelection(candidate_index=raw)
+    match = re.search(r"\d+", str(raw))
+    if not match:
+        raise ValueError("Selection reply had no candidate index.")
+    return CandidateSelection(candidate_index=int(match.group()))
 
 
 @dataclass(frozen=True)
@@ -197,6 +228,93 @@ def _matches_domain(url: str, domain: str) -> bool:
     return host == domain or host.endswith("." + domain)
 
 
+_INDIA_HINT = re.compile(r"\b(india|indian|inr|rupee|rupees)\b|₹", re.I)
+_NON_INDIA_PATH = re.compile(
+    r"/(?:us|uk|au|ca|de|fr|sg|ae|en-us|en-gb)(?=[/.-]|$)", re.I
+)
+
+
+def _india_result(request: str) -> bool:
+    return bool(_INDIA_HINT.search(request))
+
+
+def _prefer_locale(candidates: list[SearchResult], request: str) -> list[SearchResult]:
+    """Rank Indian storefronts first for India/INR requests without dropping any."""
+    if not _india_result(request):
+        return candidates
+
+    def rank(result: SearchResult) -> int:
+        host = (urlsplit(result.url).hostname or "").lower()
+        if host.endswith(".in") or "flipkart" in host:
+            return 0
+        if re.search(r"(?:^|[./-])(?:in-en|en-in)(?:[/.-]|$)", result.url, re.I):
+            return 0
+        if _NON_INDIA_PATH.search(f"{urlsplit(result.url).path}/"):
+            return 2
+        return 1
+
+    return sorted(candidates, key=rank)
+
+
+_VIDEO_HOSTS = (
+    "youtube.com",
+    "youtu.be",
+    "vimeo.com",
+    "dailymotion.com",
+    "facebook.com",
+    "instagram.com",
+    "tiktok.com",
+)
+_VIDEO_WORDS = re.compile(
+    r"\b(video|videos|youtube|watch|clip|clips|tutorial|walkthrough|unboxing)\b", re.I
+)
+_PRODUCT_WORDS = re.compile(
+    r"\b(price|prices|cheapest|buy|cost|deal|deals|specs|specifications|inr|rupees)\b",
+    re.I,
+)
+_PRODUCT_URL_HINT = re.compile(
+    r"/(?:shop|shopping|store|product|products|listing|listings|buy|catalog|catalogue|dp|p)/"
+    r"|[?&](?:k|q|rh)=",
+    re.I,
+)
+
+
+def _wants_video(request: str) -> bool:
+    return bool(_VIDEO_WORDS.search(request))
+
+
+def _is_video(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower()
+    return any(host == name or host.endswith("." + name) for name in _VIDEO_HOSTS)
+
+
+def _drop_videos(
+    candidates: list[SearchResult], request: str
+) -> list[SearchResult]:
+    """Remove videos from a non-video request; never empty the candidate list."""
+    if _wants_video(request):
+        return candidates
+    kept = [result for result in candidates if not _is_video(result.url)]
+    return kept or candidates
+
+
+def _prefer_product_pages(
+    candidates: list[SearchResult], request: str
+) -> list[SearchResult]:
+    """Put shop/listings pages first for price requests without dropping any."""
+    if not _PRODUCT_WORDS.search(request):
+        return candidates
+
+    def rank(result: SearchResult) -> int:
+        if _PRODUCT_URL_HINT.search(result.url):
+            return 0
+        if _PRODUCT_WORDS.search(result.title) or _PRODUCT_WORDS.search(result.description):
+            return 1
+        return 2
+
+    return sorted(candidates, key=rank)
+
+
 def resolve_request(
     request: str,
     *,
@@ -284,6 +402,9 @@ def resolve_request(
         candidates = [result for result in results if _http_url(result.url)]
         if domain:
             candidates = [result for result in candidates if _matches_domain(result.url, domain)]
+        candidates = _drop_videos(candidates, request)
+        candidates = _prefer_locale(candidates, request)
+        candidates = _prefer_product_pages(candidates, request)
         if not candidates:
             raise DiscoveryError("No suitable page was found for that request.")
 
@@ -315,10 +436,10 @@ def resolve_request(
                 role="fast",
                 max_tokens=1024,
             )
-            selection = CandidateSelection.model_validate(parse_json(selection_response.text))
-        except (ScoutError, ValidationError, ValueError):
+            selection = _selection(parse_json(selection_response.text))
+        except (ScoutError, ValidationError, ValueError) as error:
             selection_warnings.append(
-                "Could not choose among search results; using the top result instead."
+                f"Could not choose among search results ({error}); using the top result instead."
             )
             chosen = candidates[0]
         else:

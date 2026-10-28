@@ -181,8 +181,15 @@ def _vision_messages(system: str, payload: str, screenshot: bytes) -> ChatMessag
     )
 
 
-def _mode(plan: ExtractionPlan, instruction: str, groups: int) -> ExtractionPlan:
-    mode = "list" if LIST_WORDS.search(instruction) or groups >= 3 else plan.mode
+def _mode(
+    plan: ExtractionPlan, instruction: str, groups: int, best_group: int = 0
+) -> ExtractionPlan:
+    """Prefer list mode when the page actually contains a repeated item group."""
+    mode = (
+        "list"
+        if LIST_WORDS.search(instruction) or groups >= 3 or best_group >= 3
+        else plan.mode
+    )
     return plan.model_copy(update={"mode": mode})
 
 
@@ -341,9 +348,13 @@ def run(
             cached = cache.get_result(result_key)
             if cached is not None:
                 restored = ExtractResult.model_validate(cached)
-                return restored.model_copy(
-                    update={"meta": restored.meta.model_copy(update={"cache_hit": True})}
-                )
+                # Don't trust cached empties. They are almost always a failed attempt
+                # and will block the TinyFish -> local Chromium fallback.
+                if restored.items:
+                    return restored.model_copy(
+                        update={"meta": restored.meta.model_copy(update={"cache_hit": True})}
+                    )
+                warnings.append("Ignoring cached empty result to retry with fallback logic.")
 
         page_key = f"{source}:{url}"
         cached_page = None if options.force_refresh else cache.get_page(page_key)
@@ -367,7 +378,22 @@ def run(
                         allow_localhost=options.allow_localhost or settings.allow_localhost,
                     )
             if source == "tinyfish":
-                fetched = fetcher.fetch(url, force_refresh=options.force_refresh)
+                try:
+                    fetched = fetcher.fetch(url, force_refresh=options.force_refresh)
+                except ScoutError as error:
+                    warnings.append(
+                        f"TinyFish could not read this page ({error}); "
+                        "falling back to local fetch/render."
+                    )
+                    if owned_fetcher:
+                        fetcher.close()
+                    source = "http"
+                    page_key = f"{source}:{url}"
+                    fetcher = Fetcher(
+                        user_agent=settings.user_agent,
+                        allow_localhost=options.allow_localhost or settings.allow_localhost,
+                    )
+                    fetched = fetcher.fetch(url, ignore_robots=options.ignore_robots)
             elif source == "youtube":
                 fetched = fetcher.fetch(url)
             else:
@@ -394,6 +420,43 @@ def run(
                 "Page appears blocked; CAPTCHA or bot-bypass attempts are not supported."
             )
             raise _PipelineStop
+
+        groups = find_candidate_groups(page)
+        best_group = max((len(group.items) for group in groups), default=0)
+        has_table = any(len(table.rows) >= 2 for table in page.tables)
+        has_product_jsonld = any(
+            isinstance(entry, dict)
+            and entry.get("@type") in {"Product", "ItemList", "Offer", "AggregateOffer"}
+            for entry in page.jsonld
+        )
+        thin_content = len(page.main_text) < 1500 and not (
+            best_group >= 3 or has_table or has_product_jsonld
+        )
+        if thin_content:
+            warnings.append(
+                f"Thin content: {len(page.main_text)} chars of readable text, "
+                f"largest item group {best_group}, {len(page.tables)} table(s), "
+                f"product JSON-LD {has_product_jsonld}."
+            )
+        if (
+            source == "tinyfish"
+            and thin_content
+            and options.use_browser
+            and not options.force_browser
+        ):
+            warnings.append("Thin TinyFish page; falling back to local Chromium render.")
+            options = RunOptions(
+                ignore_robots=options.ignore_robots,
+                allow_localhost=options.allow_localhost,
+                force_refresh=options.force_refresh,
+                max_items=options.max_items,
+                force_browser=True,
+                use_browser=True,
+                routing=options.routing,
+                fetch_backend="http",
+            )
+            source = "http"
+            page_key = f"{source}:{url}"
         if source == "http" and (
             options.force_browser or (options.use_browser and page.needs_render)
         ):
@@ -487,6 +550,7 @@ def run(
         if not page.blocked and (vision_mode or not page.needs_render):
             representation = build_representation(page, max_items=options.max_items)
             groups = find_candidate_groups(page)
+            best_group = max((len(group.items) for group in groups), default=0)
             if schema is None:
                 plan_messages = _messages(
                     (PROMPTS / "plan.md").read_text(encoding="utf-8"),
@@ -508,16 +572,16 @@ def run(
                     except (ScoutError, ValidationError, ValueError) as error:
                         warnings.append(f"Schema planning attempt {attempt + 1} failed: {error}")
                 if planned is None:
-                    plan = _mode(plan, instruction, len(groups))
+                    plan = _mode(plan, instruction, len(groups), best_group)
                     raise _PipelineStop
-                plan = _mode(planned, instruction, len(groups))
+                plan = _mode(planned, instruction, len(groups), best_group)
             else:
                 supplied_plan = _schema(schema)
                 if supplied_plan is None:
                     raise ValueError(
                         "The supplied schema could not be converted to an extraction plan."
                     )
-                plan = _mode(supplied_plan, instruction, len(groups))
+                plan = _mode(supplied_plan, instruction, len(groups), best_group)
             system = (PROMPTS / ("vision.md" if vision_mode else "extract.md")).read_text(
                 encoding="utf-8"
             )
@@ -592,12 +656,19 @@ def run(
                         max_tokens=8192,
                         require_vision=vision_mode,
                     )
+                    original_items = items
                     repaired = _merge_repair(raw, parse_json(repaired_response.text))
                     repaired_validation = validate_items(
                         repaired, plan, page.source_text, vision=vision_mode
                     )
-                    items = repaired_validation.items
-                    warnings.extend(repaired_validation.errors)
+                    if repaired_validation.items:
+                        items = repaired_validation.items
+                        warnings.extend(repaired_validation.errors)
+                    else:
+                        items = original_items
+                        warnings.append(
+                            "Repair produced no usable rows; kept the pre-repair values."
+                        )
                 except (ScoutError, ValueError) as error:
                     warnings.append(f"Repair failed; keeping validated values: {error}")
     except _PipelineStop:
@@ -626,6 +697,11 @@ def run(
     except (AttributeError, IndexError, TypeError):
         model_calls = []
     warnings.extend(getattr(llm, "warnings", []))
+    if not items:
+        warnings.append(
+            "No verified rows were extracted; this empty result was not cached "
+            "so it can be retried."
+        )
     prompt_tokens, completion_tokens, cost, model_latency = _totals(model_calls)
     meta = RunMeta(
         run_id=run_id,
@@ -652,10 +728,11 @@ def run(
         meta=meta,
         raw_text_preview=page.main_text[:1000] if page else "",
     )
-    cache.set_result(
-        result_key if "result_key" in locals() else digest(url + instruction),
-        result.model_dump(mode="json"),
-    )
+    if result.items:
+        cache.set_result(
+            result_key if "result_key" in locals() else digest(url + instruction),
+            result.model_dump(mode="json"),
+        )
     return result
 
 
