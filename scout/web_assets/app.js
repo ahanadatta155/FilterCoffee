@@ -719,8 +719,7 @@ document.querySelectorAll('[role="tab"]').forEach((tab, index, tabs) => {
     showView(tabs[next].id.replace("-tab", ""), true);
   });
 });
-$("quota-refresh").addEventListener("click", async () => {
-  $("quota-refresh").disabled = true;
+async function updateQuota() {
   try {
     const quota = await api("/api/quota", {});
     const used = quota.free_requests_used,
@@ -730,7 +729,7 @@ $("quota-refresh").addEventListener("click", async () => {
         ? "Not reported by provider"
         : `${used ?? "?"} / ${limit} used`;
     $("quota-note").textContent =
-      `Checked ${new Date().toLocaleTimeString()}. Usage can lag; check again after a run.`;
+      `Live · updated ${new Date().toLocaleTimeString()}. Usage can lag.`;
     $("quota-meter").hidden = used == null || limit == null || limit <= 0;
     if (!$("quota-meter").hidden) {
       $("quota-meter").max = limit;
@@ -738,10 +737,10 @@ $("quota-refresh").addEventListener("click", async () => {
     }
   } catch (error) {
     $("quota-note").textContent = error.message;
-  } finally {
-    $("quota-refresh").disabled = false;
   }
-});
+}
+updateQuota();
+setInterval(updateQuota, 60000);
 $("copy").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(markdown());

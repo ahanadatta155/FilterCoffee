@@ -77,7 +77,7 @@
           <svg><use href="#i-menu" /></svg></button
         ><svg class="mark" aria-hidden="true"><use href="#i-cup" /></svg
         >FilterCoffee
-        <span class="pill">LOCAL WORKSPACE</span>
+        <span class="pill">Local workspace</span>
       </div>
       <div class="top-actions">
         <span class="connection" id="connection"
@@ -242,12 +242,11 @@
         </details>
         <div class="quota">
           <div class="quota-line">
-            <span>OpenRouter quota</span
-            ><button id="quota-refresh" class="text-button">Check</button>
+            <span>OpenRouter quota</span>
           </div>
-          <div id="quota-value">Not checked</div>
+          <div id="quota-value">Checking...</div>
           <meter id="quota-meter" min="0" max="50" value="0" hidden></meter
-          ><small id="quota-note">Checking quota does not run a model.</small>
+          ><small id="quota-note">Live status · no model calls.</small>
           <small id="quota-reset">Resets daily at 00:00 UTC (GMT).</small>
         </div>
       </aside>
@@ -285,11 +284,12 @@
         </nav>
         <div class="conversation" id="conversation">
           <section id="welcome">
-            <div class="eyebrow">Your research workspace</div>
+            <div class="eyebrow">Research workspace</div>
             <h1>What are we looking into?</h1>
             <p class="welcome-copy">
               Find a page, explore a topic, or turn a video into something you
-              can read. FilterCoffee keeps the sources close.
+              can read. FilterCoffee keeps sources organized with clear
+              evidence.
             </p>
             <div class="suggestions">
               <button
@@ -346,12 +346,12 @@
         </div>
         <div class="composer-area">
           <form id="composer" class="composer">
-            <label for="request">Your request</label
-            ><textarea
+            <textarea
               id="request"
               rows="2"
               maxlength="6000"
               placeholder="Ask FilterCoffee to find and extract something…"
+              aria-label="Your request"
               required
             ></textarea>
             <div class="composer-bottom">
@@ -368,10 +368,6 @@
             </div>
             <p id="form-error" class="form-error" role="alert" hidden></p>
           </form>
-          <p class="composer-note">
-            Each request is a new run · Ctrl+Enter to search · Browsing history
-            does not use quota
-          </p>
         </div>
       </main>
       <aside class="right" aria-label="Run inspector">
@@ -380,11 +376,11 @@
         </div>
         <h2 class="section-label">Activity</h2>
         <ol id="activity" class="trace">
-          <li class="muted">The steps of your next run will appear here.</li>
+          <li class="muted">Steps for your next run will appear here.</li>
         </ol>
         <div id="metrics" class="metrics"></div>
         <section id="exports" hidden>
-          <h2 class="section-label">Keep your findings</h2>
+          <h2 class="section-label">Export findings</h2>
           <button id="copy" class="tiny-button">
             <svg aria-hidden="true"><use href="#i-copy" /></svg>Copy Markdown</button
           ><button id="json-export" class="tiny-button">
