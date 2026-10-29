@@ -148,7 +148,7 @@ function scopeChanged() {
   $("browser").disabled = mode === "manual" || mode === "sources";
   if (mode !== "sources") $("opencli").checked = false;
   const help = {
-    auto: "FilterCoffee finds one relevant page or video. Mention YouTube to search for a video.",
+    auto: "Look up a page or video, or compare products across relevant websites.",
     sources:
       "Search the chosen sources and combine their hits into one result. YouTube runs separately.",
     url: "Read one public page or video. URLs and redirects still pass through the existing safety checks.",
@@ -162,7 +162,7 @@ function scopeChanged() {
     mode === "sources"
       ? sources.map((s) => names[s]).join(" + ") || "Choose a source"
       : {
-          auto: "Auto · one page or video",
+          auto: "Auto · lookup or product comparison",
           url: "Direct URL · one page",
           manual: "Saved file · no page fetch",
         }[mode];
@@ -177,6 +177,7 @@ function savePreferences() {
         sources: selectedSources(),
         browser: $("browser").value,
         max_items: $("max-items").value,
+        country: $("country").value.trim(),
         source_limit: $("source-limit").value,
       }),
     );
@@ -284,6 +285,21 @@ function renderJob(job) {
   const meta = result.meta || {};
   const items = result.items || [];
   const fields = result.plan?.fields || [];
+  if (result.research) {
+    const coverage = result.research;
+    $("footer-status").textContent = coverage.partial ? "Partial comparison" : "Comparison complete";
+    const note = node("section", null, "notice");
+    note.append(node("strong", coverage.partial ? "Partial research results" : "Product comparison"));
+    note.append(node("p", `${coverage.searches + coverage.fetches} / ${coverage.limit} search/page requests · ${coverage.domains.length} websites · ${coverage.country || "Market unspecified"}`));
+    if (coverage.partial) note.append(node("p", coverage.stop_reason));
+    note.append(node("p", "Ranked by overall fit to your requirements. Coverage is limited to the pages checked; prices and availability can change."));
+    const detail = node("details");
+    detail.append(node("summary", "Websites checked and excluded matches"));
+    coverage.domains.forEach((domain) => detail.append(node("p", `${domain.domain}: ${domain.searches} searches · ${domain.pages_read} pages read`)));
+    coverage.excluded.forEach((entry) => detail.append(node("p", entry.reasons.join("; "))));
+    note.append(detail);
+    $("response").append(note);
+  }
   $("query-meta").replaceChildren(
     node("span", meta.fetch_tier || "Source"),
     node("span", `${items.length} row${items.length === 1 ? "" : "s"}`),
@@ -342,6 +358,7 @@ function renderJob(job) {
     details.append(
       node("summary", `Supporting evidence (${item.evidence?.length || 0})`),
     );
+    if (result.research && item.data?.source_url) details.append(safeLink(item.data.source_url, "Read this listing"));
     (item.evidence || []).forEach((entry) =>
       details.append(
         node("strong", label(entry.field)),
@@ -470,6 +487,7 @@ function renderEvidence(items) {
   );
   items.forEach((item, index) => {
     const details = node("details");
+    if (state.job?.result?.research && item.data?.source_url) details.append(safeLink(item.data.source_url, "Read this listing"));
     details.append(
       node(
         "summary",
@@ -551,6 +569,7 @@ async function submit(event) {
   const payload = {
     request: $("request").value.trim(),
     mode,
+    country: $("country").value.trim(),
     max_items: Number($("max-items").value),
     source_limit: Number($("source-limit").value),
     refresh: $("refresh").checked,
@@ -603,6 +622,13 @@ function markdown() {
   const result = state.job?.result;
   if (!result) return "";
   const lines = [`# ${state.job.request}`, "", `Source: ${result.url}`, ""];
+  if (result.research) {
+    const r = result.research;
+    lines.push(`Status: ${r.partial ? "Partial comparison" : "Comparison complete"}`,
+      `Country / market: ${r.country || "Unspecified"}`,
+      `Search/page requests: ${r.searches + r.fetches} / ${r.limit}`,
+      `Coverage: ${r.domains.length} websites. ${r.stop_reason}`, "");
+  }
   (result.items || []).forEach((item, index) => {
     lines.push(`## Result ${index + 1}`, "");
     Object.entries(item.data || {}).forEach(([key, value]) =>
@@ -628,6 +654,7 @@ function download(text, type, extension) {
 function csv() {
   const result = state.job.result;
   const fields = result.plan.fields.map((f) => f.name);
+  const extraFields = result.research ? ["research_partial", "research_stop_reason"] : [];
   const escape = (value) => {
     let text = value === null || value === undefined ? "" : display(value);
     // Keep untrusted spreadsheet text from becoming executable formulas.
@@ -636,7 +663,10 @@ function csv() {
   };
   return (
     "\ufeff" +
-    [fields, ...result.items.map((item) => fields.map((f) => item.data[f]))]
+    [[...fields, ...extraFields], ...result.items.map((item) => [
+      ...fields.map((f) => item.data[f]),
+      ...(result.research ? [result.research.partial, result.research.stop_reason] : []),
+    ])]
       .map((row) => row.map(escape).join(","))
       .join("\r\n")
   );
@@ -770,6 +800,7 @@ async function boot() {
       localStorage.getItem("scout-preferences") || "null",
     );
     if (prefs) {
+      if (typeof prefs.country === "string") $("country").value = prefs.country.slice(0, 80);
       if (["auto", "sources", "url", "manual"].includes(prefs.mode))
         $("mode").value = prefs.mode;
       if (["auto", "off", "chromium", "cloak"].includes(prefs.browser))

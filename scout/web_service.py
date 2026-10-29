@@ -32,9 +32,11 @@ from scout.limits import get_openrouter_key_status
 from scout.llm import ChatMessages, LLMClient, LLMResponse, ModelClient, Role
 from scout.manual import ManualFetcher
 from scout.pipeline import RunOptions, run
+from scout.product_research import ProductResearch
 from scout.research import research
 from scout.sources.opencli import OpenCLISource
 from scout.sources.registry import build_registry
+from scout.tinyfish import TinyFishClient
 
 Emit = Callable[[str, str], None]
 SOURCES = {"web", "github", "hn", "stackexchange", "bluesky", "youtube", "opencli"}
@@ -56,6 +58,7 @@ class WebRequest(BaseModel):
 
     request: str = Field(min_length=1, max_length=6000)
     mode: Literal["auto", "sources", "url", "manual"] = "auto"
+    country: str = Field(default="", max_length=80)
     sources: list[str] = Field(default_factory=list, max_length=7)
     url: str = Field(default="", max_length=2000)
     browser: Literal["auto", "off", "chromium", "cloak"] = "auto"
@@ -161,6 +164,9 @@ class ProgressClient:
     ) -> LLMResponse:
         labels = {
             "discover": "Understanding request",
+            "product_intent": "Understanding request",
+            "product_present": "Formatting comparison",
+            "product_research": "Comparing products",
             "discover_select": "Selecting a result",
             "research_plan": "Planning research",
             "plan": "Planning fields",
@@ -237,13 +243,17 @@ def execute_request(
             fetcher = ManualFetcher(file, citation_url=url or None, title=request.filename)
             url = fetcher.url
             emit("Reading saved file", request.filename)
-        elif request.mode != "url":
-            query = request.request
+        elif request.mode != "url" or request.url:
+            query = request.request + (" " + request.url if request.mode == "url" else "")
+            if request.country:
+                query += (
+                    "\nSelected country/market (overrides country in request): " + request.country
+                )
             if request.sources == ["youtube"]:
                 query = f"Search YouTube for a video: {query}"
             emit("Searching", "Finding a public page or video for your request.")
             cache = Cache(cache_path)
-            discovery_key = digest("discover:v1:" + " ".join(query.casefold().split()))
+            discovery_key = digest("discover:v2:" + " ".join(query.casefold().split()))
             saved = None if request.refresh else cache.get_discovery(discovery_key)
             if saved:
                 url = saved["url"]
@@ -256,8 +266,31 @@ def execute_request(
                 )
             else:
                 discovery = resolve_request(
-                    query, settings=settings, llm=client, search_provider="auto"
+                    query,
+                    settings=settings,
+                    llm=client,
+                    search_provider="auto",
+                    allow_product_research=request.mode in {"auto", "url"},
                 )
+                if discovery.product_research is not None:
+                    product_plan = discovery.product_research.model_copy(deep=True)
+                    if request.country:
+                        product_plan.country = request.country
+                    if request.mode == "url":
+                        product_plan.scope, product_plan.url = "url", request.url
+                    tiny = TinyFishClient(os.getenv("TINYFISH_API_KEY", ""), cache=cache)
+                    stack.callback(tiny.close)
+                    checker = stack.enter_context(Fetcher(user_agent=settings.user_agent))
+                    # Router leaves final formatting on Nemotron; only this loop uses Gemini.
+                    return ProductResearch(
+                        product_plan,
+                        gemini=ProgressClient(gemini, emit),
+                        nemotron=client,
+                        tinyfish=tiny,
+                        robots_check=checker.check_robots,
+                        resolver=tiny.resolver,
+                        emit=emit,
+                    ).run(request.request)
                 url, instruction = discovery.url, discovery.instruction
                 emit("Selected source", f"{discovery.title or url} · {url}")
                 discovery_payload = {

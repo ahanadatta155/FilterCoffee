@@ -365,6 +365,7 @@ main {
   margin: 11px 9px 7px;
 }
 select,
+input#country,
 input[type="url"],
 input[type="number"] {
   width: 100%;

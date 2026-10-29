@@ -107,11 +107,14 @@
           <h2 class="section-label">Search scope</h2>
           <label class="field-label" for="mode">Where to look</label>
           <select id="mode">
-            <option value="auto">Auto · find a page or video</option>
+            <option value="auto">Auto · lookup or product research</option>
             <option value="sources">Choose sources</option>
             <option value="url">Read a specific URL</option>
             <option value="manual">Import saved page</option>
           </select>
+          <label class="field-label" for="country">Country / market</label>
+          <input id="country" type="text" maxlength="80" placeholder="Optional · e.g. India" autocomplete="country-name" />
+          <p class="subtle">Product comparisons: up to 15 sites and 200 search/page requests. Requests and page text are sent to Gemini and TinyFish.</p>
           <p class="subtle" id="scope-help">
             FilterCoffee finds one relevant page or video. Mention YouTube in
             your request to search for a video.

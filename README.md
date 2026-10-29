@@ -44,6 +44,44 @@ the startup resolver checks them against the selected provider.
 
 ### Local web workspace (Windows)
 
+#### Product comparisons
+
+In Auto mode, describe what you want to buy, your hard requirements and budget,
+and any preferences. The optional **Country / market** field guides retailer searches;
+it overrides a country in the request. No location is inferred from your computer.
+Ordinary factual lookups and page/video extraction keep the single-page flow.
+
+Product research uses one Nemotron request to interpret the task, Gemini to guide
+TinyFish Search/Fetch and compare actual listing pages, then one Nemotron request
+to select presentation fields. Intermediate product research does not invoke
+Nemotron planning/repair or TinyFish's paid Agent/Research endpoints.
+
+- Up to 15 relevant main domains; fewer when fewer are useful.
+- Up to two targeted searches and ten fetched listing pages per domain, one
+  supported configuration per listing. At most ten qualifying results per domain.
+- **200 combined TinyFish search/fetch attempts per run**, failures included:
+  up to 20 discovery searches plus domain searches and page reads.
+- Optional country, named retailer, or supplied URL constrain the scope. A URL
+  starts on its same main domain/subdomains, not unrelated country domains.
+- Only page-supported facts that pass all hard requirements qualify. Missing
+  or incomparable requirements do not pass; explanations appear in coverage.
+- Results include source links, checked times, quotes, exclusions, provider usage,
+  and a partial-results warning when work stops early.
+
+The research loop is additionally bounded to 90 Gemini calls, 2.4 million serialized
+input characters, 180,000 reported output tokens, 30 MiB of fetched content, and
+20 minutes before starting another operation (an in-flight request can finish later).
+These are safeguards, not promises that every run will use the full allowance.
+Gemini quotas/billing depend on your Google project; recorded zero cost is not a
+billing guarantee. Prices/stock change, coverage is not exhaustive, and ranking
+is model-assisted rather than a guarantee of the globally cheapest/best product.
+
+TinyFish currently documents 12,000 free searches/day and 1,000 fetched URLs/day:
+[Search](https://docs.tinyfish.ai/search-api) · [Fetch](https://docs.tinyfish.ai/fetch-api).
+Local per-key daily counters enforce those separate limits, independently of the
+200/run cap. They cannot see other applications using the same account; do not
+fund/enable automatic wallet spending if you need an account-wide free-only guarantee.
+
 Double-click **`run_scout_web.bat`** to open the working Scout interface in your browser.
 Keep its launcher window open while using the app; Ctrl+C in that window stops it.
 The original `run_scout.bat` remains available for the console interface.

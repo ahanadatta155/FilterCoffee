@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from scout.config import Settings
 from scout.errors import ConfigurationError, DiscoveryError, ScoutError
 from scout.llm import LLMClient, LLMResponse, ModelClient, parse_json
+from scout.product_contracts import ProductPlan
 
 PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
@@ -30,6 +31,7 @@ class RequestIntent(BaseModel):
     url: str | None = None
     site_domain: str | None = None
     query: str = Field(default="", max_length=300)
+    product_research: ProductPlan | None = None
     instruction: str = Field(min_length=1, max_length=500)
 
     @field_validator("instruction")
@@ -102,6 +104,7 @@ class DiscoveryResult:
     selection_response: LLMResponse | None
     search_provider: str = "none"
     warnings: tuple[str, ...] = ()
+    product_research: ProductPlan | None = None
 
 
 class TavilySearchClient:
@@ -229,9 +232,7 @@ def _matches_domain(url: str, domain: str) -> bool:
 
 
 _INDIA_HINT = re.compile(r"\b(india|indian|inr|rupee|rupees)\b|₹", re.I)
-_NON_INDIA_PATH = re.compile(
-    r"/(?:us|uk|au|ca|de|fr|sg|ae|en-us|en-gb)(?=[/.-]|$)", re.I
-)
+_NON_INDIA_PATH = re.compile(r"/(?:us|uk|au|ca|de|fr|sg|ae|en-us|en-gb)(?=[/.-]|$)", re.I)
 
 
 def _india_result(request: str) -> bool:
@@ -288,9 +289,7 @@ def _is_video(url: str) -> bool:
     return any(host == name or host.endswith("." + name) for name in _VIDEO_HOSTS)
 
 
-def _drop_videos(
-    candidates: list[SearchResult], request: str
-) -> list[SearchResult]:
+def _drop_videos(candidates: list[SearchResult], request: str) -> list[SearchResult]:
     """Remove videos from a non-video request; never empty the candidate list."""
     if _wants_video(request):
         return candidates
@@ -298,9 +297,7 @@ def _drop_videos(
     return kept or candidates
 
 
-def _prefer_product_pages(
-    candidates: list[SearchResult], request: str
-) -> list[SearchResult]:
+def _prefer_product_pages(candidates: list[SearchResult], request: str) -> list[SearchResult]:
     """Put shop/listings pages first for price requests without dropping any."""
     if not _PRODUCT_WORDS.search(request):
         return candidates
@@ -322,6 +319,7 @@ def resolve_request(
     llm: LLMClient | None = None,
     search: Any = None,
     search_provider: str = "tinyfish",
+    allow_product_research: bool = False,
 ) -> DiscoveryResult:
     """Classify one request, search if needed, and select one real result URL."""
     if not request.strip():
@@ -335,9 +333,11 @@ def resolve_request(
     try:
         intent_response: LLMResponse
         prompt = (PROMPTS / "discover.md").read_text(encoding="utf-8")
+        if allow_product_research:
+            prompt = (PROMPTS / "product_intent.md").read_text(encoding="utf-8")
         try:
             intent_response = llm.chat(
-                "discover",
+                "product_intent" if allow_product_research else "discover",
                 [
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": request},
@@ -348,6 +348,23 @@ def resolve_request(
             intent = RequestIntent.model_validate(parse_json(intent_response.text))
         except (ScoutError, ValidationError, ValueError) as error:
             raise DiscoveryError(f"Could not understand that request: {error}") from None
+
+        if allow_product_research and intent.product_research is not None:
+            plan = intent.product_research
+            if plan.scope == "url" and plan.url not in request:
+                raise DiscoveryError("A research URL must appear in the original request.")
+            return DiscoveryResult(
+                intent.route,
+                intent.query,
+                "",
+                plan.url,
+                intent.instruction,
+                0,
+                0,
+                intent_response,
+                None,
+                product_research=plan,
+            )
 
         if intent.route == "direct_url":
             if not intent.url or intent.url not in request or not _http_url(intent.url):

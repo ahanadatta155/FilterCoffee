@@ -194,6 +194,12 @@ class ModelClient:
             raise ModelError("Provider requests stopped after an unexpected charge.")
         use_json = model.supports_json is not False
         fallback_used = False
+        # Product intent/presentation have a strict one-physical-attempt contract.
+        if stage in {"product_present", "product_intent"}:
+            try:
+                return self._attempt(stage, messages, model, max_tokens, use_json)
+            except (APIStatusError, APIConnectionError) as error:
+                raise _friendly(error) from None
         while True:
             try:
                 return self._retry(

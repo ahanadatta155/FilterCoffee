@@ -30,7 +30,8 @@ class TinyFishClient:
         self.resolver = resolver
         # Conservative local cap, well below published daily free allowances.
         # Other apps/accounts using the same key are outside this counter's scope.
-        self.daily_limit = 100
+        self.daily_limits = {"search": 12000, "fetch": 1000}
+        self.daily_limit: int | None = None  # Optional stricter local override.
 
     def close(self) -> None:
         if self._owned:
@@ -39,7 +40,7 @@ class TinyFishClient:
     def _request(self, operation: str, **kwargs: Any) -> dict[str, Any]:
         error_type = DiscoveryError if operation == "search" else FetchError
         scope = f"tinyfish:{operation}:{digest(self._key)}"
-        if not self.cache.reserve_request(scope, self.daily_limit):
+        if not self.cache.reserve_request(scope, self.daily_limit or self.daily_limits[operation]):
             raise error_type("TinyFish local daily limit reached; wait for the UTC daily reset.")
         try:
             with self._client.stream(

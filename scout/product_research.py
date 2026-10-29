@@ -1,0 +1,523 @@
+"""Bounded Gemini-guided Search/Fetch research; no paid agent/browser endpoints."""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from tldextract import TLDExtract
+
+from scout.clean import clean_page, normalize_text
+from scout.contracts import (
+    Evidence,
+    ExtractedItem,
+    FieldSpec,
+    ModelCall,
+    RunMeta,
+)
+from scout.errors import ScoutError, SecurityError
+from scout.llm import LLMClient, parse_json
+from scout.product_contracts import (
+    Presentation,
+    ProductCandidate,
+    ProductExtractionPlan,
+    ProductPlan,
+    ProductResult,
+    ResearchTurn,
+)
+from scout.security import Resolver, resolve_host, validate_url
+from scout.tinyfish import TinyFishClient
+
+PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
+_SUFFIX = TLDExtract(suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True)
+
+
+def domain_key(url: str) -> str:
+    host = urlsplit(url).hostname
+    if not host:
+        raise ValueError("A full URL is required.")
+    host = host.encode("idna").decode("ascii").lower().rstrip(".")
+    return _SUFFIX(host).top_domain_under_public_suffix or host
+
+
+def canonical_url(url: str) -> str:
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError("A public HTTP(S) URL is required.")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("Credentials in URLs are forbidden.")
+    # Preserve configuration/query identity; remove only common tracking fields.
+    query = [
+        (k, v)
+        for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if not k.lower().startswith("utm_") and k.lower() not in {"gclid", "fbclid"}
+    ]
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc.lower(), parts.path or "/", urlencode(query), "")
+    )
+
+
+class ResearchBudget:
+    def __init__(self) -> None:
+        self.searches = 0
+        self.fetches = 0
+
+    def reserve(self, operation: str) -> None:
+        if operation not in {"search", "fetch"}:
+            raise ValueError("Unknown research operation.")
+        if self.searches + self.fetches >= 200:
+            raise ValueError("200 combined TinyFish attempts reached.")
+        if operation == "search":
+            self.searches += 1
+        else:
+            self.fetches += 1
+
+
+def _number(value: str) -> Decimal | None:
+    text = value.strip().replace(",", "")
+    match = re.fullmatch(r"(?:[^\d\s.,+-]{1,4}\s*)?(\d+(?:\.\d+)?)\s*(?:[A-Za-z%]+)?", text)
+    if not match:
+        return None
+    try:
+        return Decimal(match[1])
+    except InvalidOperation:
+        return None
+
+
+def qualifying(candidate: ProductCandidate, plan: ProductPlan, text: str) -> list[str]:
+    """Verify exact quotations and hard constraints before accepting a model's score."""
+    failures = []
+    normalized = normalize_text(text).casefold()
+    for name, fact in candidate.facts.items():
+        quote, value = normalize_text(fact.quote).casefold(), normalize_text(fact.value).casefold()
+        if quote not in normalized or value not in quote:
+            failures.append(f"{name}: unsupported evidence")
+        if fact.unit and fact.unit.casefold() not in quote:
+            failures.append(f"{name}: unsupported unit/currency")
+    for required in ("title", "price", "configuration"):
+        if required not in candidate.facts:
+            failures.append(f"{required}: unknown")
+    for constraint in plan.constraints:
+        fact = candidate.facts.get(constraint.field)
+        if not fact:
+            failures.append(f"{constraint.field}: unknown hard requirement")
+            continue
+        unit_ok = not constraint.unit or constraint.unit.casefold() == fact.unit.casefold()
+        actual, expected = _number(fact.value), _number(constraint.value)
+        if constraint.operator in {"min", "max"}:
+            passed = unit_ok and actual is not None and expected is not None
+            if actual is not None and expected is not None and unit_ok:
+                passed = actual >= expected if constraint.operator == "min" else actual <= expected
+        else:
+            left, right = fact.value.casefold(), constraint.value.casefold()
+            passed = unit_ok and (
+                left == right if constraint.operator == "equals" else right in left
+            )
+        if not passed:
+            failures.append(f"{constraint.field}: hard requirement not met or not comparable")
+    return failures
+
+
+class ProductResearch:
+    """Sequential, bounded tool loop with append-only verified evidence and provenance."""
+
+    def __init__(
+        self,
+        plan: ProductPlan,
+        *,
+        gemini: LLMClient,
+        nemotron: LLMClient,
+        tinyfish: TinyFishClient,
+        robots_check: Callable[[str], None],
+        emit: Callable[[str, str], None],
+        resolver: Resolver = resolve_host,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self.plan, self.gemini, self.nemotron, self.tinyfish = plan, gemini, nemotron, tinyfish
+        self.robots_check, self.emit, self.resolver, self.clock = (
+            robots_check,
+            emit,
+            resolver,
+            clock,
+        )
+        self.budget = ResearchBudget()
+        self.started = clock()
+        self.domains: dict[str, dict] = {}
+        self.known: dict[str, dict] = {}
+        self.pages: dict[str, dict] = {}
+        self.attempted: set[str] = set()
+        self.queries: set[tuple[str, str]] = set()
+        self.candidates: dict[str, dict] = {}
+        self.excluded: list[dict] = []
+        self.warnings: list[str] = []
+        self.discovery_searches = 0
+        self.gemini_calls = 0
+        self.input_chars = 0
+        self.output_tokens = 0
+        self.bytes_read = 0
+        self.stop_reason = "completed"
+        self.partial = False
+        self.scope_domain = domain_key(plan.url) if plan.scope == "url" else ""
+        self.last_results: list[dict] = []
+
+    def _check_time(self) -> None:
+        # A single in-flight bounded provider request may finish after this deadline.
+        if self.clock() - self.started >= 1200:
+            raise TimeoutError("20-minute research deadline reached.")
+
+    def _admit(self, domain: str) -> dict:
+        if self.scope_domain and domain != self.scope_domain:
+            raise SecurityError("Result is outside the selected website.")
+        if domain not in self.domains:
+            if len(self.domains) >= 15:
+                raise ValueError("15-domain limit reached.")
+            self.domains[domain] = {
+                "domain": domain,
+                "searches": 0,
+                "fetches": 0,
+                "pages_read": 0,
+                "qualifying": 0,
+            }
+        return self.domains[domain]
+
+    def search(self, query: str, domain: str = "") -> dict:
+        self._check_time()
+        query = query.strip()
+        if not query:
+            raise ValueError("Search query is empty.")
+        # Model-supplied site: operators must not override the backend scope.
+        query = re.sub(r"\bsite:\S+", "", query, flags=re.I).strip()
+        if domain:
+            if "://" in domain or "/" in domain or " " in domain:
+                raise ValueError("Expected a domain, not a URL.")
+            domain = domain_key("https://" + domain)
+            if not any(domain_key(url) == domain for url in self.known):
+                raise ValueError("Discover the website in search results before targeting it.")
+            report = self._admit(domain)
+            if report["searches"] >= 2:
+                raise ValueError("Two targeted searches per domain reached.")
+        else:
+            if self.scope_domain:
+                domain = self.scope_domain
+                report = self._admit(domain)
+                if report["searches"] >= 2:
+                    raise ValueError("Two targeted searches per domain reached.")
+            elif self.discovery_searches >= 20:
+                raise ValueError("20 discovery searches reached.")
+        key = (domain, query.casefold())
+        if key in self.queries:
+            raise ValueError("Repeated search skipped.")
+        self.queries.add(key)
+        self.budget.reserve("search")
+        if domain:
+            self.domains[domain]["searches"] += 1
+        else:
+            self.discovery_searches += 1
+        country = f" {self.plan.country}" if self.plan.country else ""
+        site = f"site:{domain} " if domain else ""
+        self.emit("Searching products", domain or "Discovering relevant websites")
+        found = self.tinyfish.search(
+            site + query + country, include_domains=[domain] if domain else None
+        )
+        rows = []
+        for hit in found:
+            try:
+                url = canonical_url(hit.url)
+                host = domain_key(url)
+                if domain and host != domain:
+                    continue
+                validate_url(url, resolver=self.resolver)
+            except (ScoutError, ValueError):
+                continue
+            self.known[url] = {
+                "url": url,
+                "domain": host,
+                "title": hit.title,
+                "snippet": hit.description,
+            }
+            rows.append(self.known[url])
+        return {"operation": "search", "results": rows}
+
+    def fetch(self, url: str) -> dict:
+        self._check_time()
+        url = canonical_url(url)
+        if url not in self.known:
+            raise SecurityError("Only search-result URLs or the supplied URL may be fetched.")
+        if url in self.attempted:
+            raise ValueError("Page already attempted; use its existing evidence.")
+        domain = domain_key(url)
+        report = self._admit(domain)
+        if report["fetches"] >= 10:
+            raise ValueError("Ten fetched listing pages per domain reached.")
+        validate_url(url, resolver=self.resolver)
+        self.robots_check(url)
+        self.attempted.add(url)
+        self.budget.reserve("fetch")
+        report["fetches"] += 1
+        self.emit("Reading product page", url)
+        fetched = self.tinyfish.fetch(url, force_refresh=True)
+        final = canonical_url(fetched.url)
+        validate_url(final, resolver=self.resolver)
+        if domain_key(final) != domain:
+            raise SecurityError("Redirect left the selected website; content was discarded.")
+        self.robots_check(final)
+        self.bytes_read += len(fetched.html.encode("utf-8"))
+        if self.bytes_read > 30 * 1024**2:
+            raise TimeoutError("30 MiB research content limit reached.")
+        cleaned = clean_page(fetched.html, final)
+        if cleaned.blocked or not cleaned.source_text:
+            raise ValueError("Page is empty or blocked; no alternate fetch attempted.")
+        page_id = f"p{len(self.pages) + 1}"
+        # Store only the bounded text actually shown to Gemini for quote verification.
+        page = {
+            "page_id": page_id,
+            "url": url,
+            "final_url": final,
+            "domain": domain,
+            "checked_at": datetime.now(UTC).isoformat(),
+            "title": cleaned.title,
+            "text": cleaned.source_text[:16000],
+        }
+        self.pages[page_id] = page
+        report["pages_read"] += 1
+        return {"operation": "fetch", "page": page}
+
+    def accept(self, candidate: ProductCandidate) -> None:
+        page = self.pages.get(candidate.page_id)
+        if not page:
+            self.excluded.append({"id": candidate.id, "reasons": ["Page was not fetched"]})
+            return
+        failures = qualifying(candidate, self.plan, page["text"])
+        all_fields = set(candidate.facts)
+        for accepted in self.candidates.values():
+            all_fields.update(accepted["candidate"]["facts"])
+        if len(all_fields) > 30:
+            failures.append("Comparison field limit reached; use consistent requested fields.")
+        if failures:
+            self.excluded.append({"id": candidate.id, "url": page["url"], "reasons": failures})
+            return
+        # One configuration per fetched listing; no combining prices from unrelated variants.
+        key = page["final_url"]
+        if key in self.candidates:
+            return
+        self.candidates[key] = {
+            "candidate": candidate.model_dump(),
+            **{k: v for k, v in page.items() if k != "text"},
+        }
+
+    def _turn(self) -> ResearchTurn:
+        payload = {
+            "plan": self.plan.model_dump(),
+            "scope_domain": self.scope_domain,
+            "usage": {"searches": self.budget.searches, "fetches": self.budget.fetches},
+            "domains": list(self.domains.values()),
+            "observations": self.last_results,
+            "pages": [
+                {k: v for k, v in page.items() if k != "text"} for page in self.pages.values()
+            ],
+            "accepted": [v["candidate"] for v in self.candidates.values()],
+            "excluded": self.excluded[-20:],
+        }
+        content = json.dumps(payload, ensure_ascii=False)
+        messages = [
+            {"role": "system", "content": (PROMPTS / "product_research.md").read_text("utf-8")},
+            {"role": "user", "content": content},
+        ]
+        input_size = len(json.dumps(messages, ensure_ascii=False))
+        if self.gemini_calls >= 90 or self.input_chars + input_size > 2400000:
+            raise TimeoutError("Gemini iteration/input budget reached.")
+        if self.output_tokens >= 180000:
+            raise TimeoutError("Gemini output-token budget reached.")
+        self.gemini_calls += 1
+        self.input_chars += input_size
+        response = self.gemini.chat(
+            "product_research",
+            messages,
+            max_tokens=min(8192, 180000 - self.output_tokens),
+        )
+        self.output_tokens += response.completion_tokens
+        return ResearchTurn.model_validate(parse_json(response.text))
+
+    def run(self, request: str) -> dict:
+        idle = 0
+        try:
+            if self.plan.scope == "url":
+                url = canonical_url(self.plan.url)
+                self.known[url] = {"url": url, "domain": self.scope_domain}
+                self.last_results = [self.fetch(url)]
+            while True:
+                self._check_time()
+                turn = self._turn()
+                for candidate in turn.candidates:
+                    self.accept(candidate)
+                if turn.done:
+                    break
+                before = (len(self.known), len(self.pages), len(self.candidates))
+                self.last_results = []
+                for action in turn.actions:
+                    try:
+                        if action.operation == "search":
+                            # Resolve a named retailer once using a search, then lock to an
+                            # observed domain selected by Gemini, never an invented URL.
+                            if self.plan.scope == "site" and not self.scope_domain:
+                                if self.discovery_searches >= 2:
+                                    raise ValueError("Select the named site's domain from results.")
+                                if action.domain:
+                                    chosen = domain_key("https://" + action.domain)
+                                    if any(domain_key(u) == chosen for u in self.known):
+                                        self.scope_domain = chosen
+                                query = f"{self.plan.site} official website {self.plan.country}"
+                                result = self.search(
+                                    query if not self.scope_domain else action.query,
+                                    action.domain if self.scope_domain else "",
+                                )
+                            else:
+                                result = self.search(action.query, action.domain)
+                        else:
+                            if self.plan.scope == "site" and not self.scope_domain:
+                                raise ValueError("Resolve and select the named site first.")
+                            result = self.fetch(action.url)
+                        self.last_results.append(result)
+                    except (ScoutError, ValueError) as error:
+                        message = str(error)
+                        self.last_results.append({"error": message})
+                        self.warnings.append(message)
+                        if self.budget.searches + self.budget.fetches >= 200:
+                            raise TimeoutError("200 combined TinyFish attempts reached.") from error
+                        if any(
+                            word in message.lower()
+                            for word in (
+                                "allowance exhausted",
+                                "daily limit",
+                                "rate limit",
+                                "rejected the key",
+                            )
+                        ):
+                            raise TimeoutError(message) from error
+                after = (len(self.known), len(self.pages), len(self.candidates))
+                idle = idle + 1 if before == after else 0
+                if idle >= 3:
+                    raise TimeoutError("Stopped after three rounds without new usable evidence.")
+        except (ScoutError, ValueError, TimeoutError) as error:
+            self.partial, self.stop_reason = True, str(error)
+            self.warnings.append(self.stop_reason)
+        return self.result(request)
+
+    def result(self, request: str) -> dict:
+        ordered = sorted(self.candidates.values(), key=lambda row: -row["candidate"]["score"])
+        for row in ordered:
+            self.domains[row["domain"]]["qualifying"] += 1
+        # Internal page-derived identity avoids model ID collisions in the formatter.
+        for row in ordered:
+            row["candidate"]["id"] = row["page_id"]
+        fields = sorted({name for row in ordered for name in row["candidate"]["facts"]})
+        self.emit("Formatting comparison", f"{len(ordered)} supported product matches")
+        try:
+            response = self.nemotron.chat(
+                "product_present",
+                [
+                    {
+                        "role": "system",
+                        "content": (PROMPTS / "product_present.md").read_text("utf-8"),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "request": request,
+                                "candidates": [
+                                    {
+                                        "id": row["page_id"],
+                                        "domain": row["domain"],
+                                        "score": row["candidate"]["score"],
+                                        "fields": list(row["candidate"]["facts"]),
+                                    }
+                                    for row in ordered
+                                ],
+                                "fields": fields,
+                                "partial": self.partial,
+                                "stop_reason": self.stop_reason,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                max_tokens=4096,
+            )
+            presentation = Presentation.model_validate(parse_json(response.text))
+            if presentation.candidate_ids != [row["page_id"] for row in ordered]:
+                raise ValueError("Formatter changed the verified ranking or candidate set.")
+            if any(field not in fields for field in presentation.highlight_fields):
+                raise ValueError("Formatter introduced unsupported fields.")
+            fields = list(dict.fromkeys([*presentation.highlight_fields, *fields]))
+        except (ScoutError, ValueError) as error:
+            self.partial = True
+            self.stop_reason = "Presentation failed; verified comparison retained."
+            self.warnings.append(f"Presentation failed; verified table retained: {error}")
+        columns = ["domain", "source_url", "checked_at", *fields, "match_score"]
+        items = []
+        for row in ordered:
+            facts = row["candidate"]["facts"]
+            items.append(
+                ExtractedItem(
+                    data={
+                        "domain": row["domain"],
+                        "source_url": row["final_url"],
+                        "checked_at": row["checked_at"],
+                        **{name: fact["value"] for name, fact in facts.items()},
+                        "match_score": row["candidate"]["score"],
+                    },
+                    evidence=[
+                        Evidence(field=name, quote=fact["quote"]) for name, fact in facts.items()
+                    ],
+                    confidence=0.8,
+                )
+            )
+        calls: list[ModelCall] = [*self.nemotron.calls, *self.gemini.calls]
+        result = ProductResult(
+            url="research:products",
+            instruction=request,
+            plan=ProductExtractionPlan(
+                mode="list",
+                fields=[
+                    FieldSpec(name=name, type="string", description=name.replace("_", " "))
+                    for name in columns
+                ],
+            ),
+            items=items,
+            meta=RunMeta(
+                run_id=uuid.uuid4().hex,
+                url="research:products",
+                fetch_tier="product_research",
+                model_calls=calls,
+                prompt_tokens=sum(c.prompt_tokens for c in calls),
+                completion_tokens=sum(c.completion_tokens for c in calls),
+                estimated_cost_usd=sum(c.cost_usd for c in calls),
+                latency_ms=int((self.clock() - self.started) * 1000),
+                warnings=[
+                    *self.warnings,
+                    "Research is bounded, not exhaustive; prices and stock may change.",
+                ],
+            ),
+        )
+        output = result.model_dump(mode="json")
+        output["research"] = {
+            "partial": self.partial,
+            "stop_reason": self.stop_reason,
+            "country": self.plan.country,
+            "scope": self.plan.scope,
+            "searches": self.budget.searches,
+            "fetches": self.budget.fetches,
+            "limit": 200,
+            "domains": list(self.domains.values()),
+            "excluded": self.excluded,
+            "gemini_calls": self.gemini_calls,
+        }
+        return output
